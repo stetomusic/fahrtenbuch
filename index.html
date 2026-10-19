@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Fahrtenbuch</title>
+<meta name="theme-color" content="#0e6b50">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Fahrtenbuch">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+/* Layout: one column phone app; summary strip, big start/stop control, trip log grouped by month; sheets slide up from the bottom. */
+:root {
+  --bg: #eef2f0;
+  --surface: #ffffff;
+  --ink: #15201b;
+  --muted: #5b6a63;
+  --line: #d6dedA;
+  --accent: #0e6b50;
+  --accent-ink: #ffffff;
+  --run: #c2410c;
+  --danger: #b42318;
+  --soft: #e2ebe7;
+  --font-body: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1412; --surface: #17201c; --ink: #e5ece8; --muted: #98a7a0; --line: #2a3632;
+    --accent: #3cbf8e; --accent-ink: #06231a; --run: #f08a4b; --danger: #f2675c; --soft: #1f2b27;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1412; --surface: #17201c; --ink: #e5ece8; --muted: #98a7a0; --line: #2a3632;
+  --accent: #3cbf8e; --accent-ink: #06231a; --run: #f08a4b; --danger: #f2675c; --soft: #1f2b27;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 16px/1.45 var(--font-body);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  -webkit-tap-highlight-color: transparent;
+}
+[hidden] { display: none !important; }
+.wrap {
+  max-width: 560px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 16px;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+header.top { display: flex; align-items: center; justify-content: space-between; padding-block: 14px 2px; gap: 12px; }
+header.top h1 { font: 700 26px/1 var(--font-display); letter-spacing: .02em; text-transform: uppercase; margin: 0; }
+header.top .sub { color: var(--muted); font-size: 14px; }
+.icon-btn { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; width: 44px; height: 44px; display: grid; place-items: center; }
+.icon-btn svg { width: 22px; height: 22px; stroke: var(--ink); fill: none; stroke-width: 2; }
+
+.summary { display: grid; grid-template-columns: auto 1fr 1fr; gap: 12px; align-items: center; }
+.yearsw { display: flex; align-items: center; gap: 2px; font: 600 20px var(--font-display); }
+.yearsw button { background: none; border: 0; width: 32px; height: 40px; font-size: 22px; color: var(--muted); }
+.stat .lbl, .lbl { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.stat .val { font: 600 24px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
+.warn { color: var(--danger); font-size: 13px; }
+
+.control { background: var(--surface); border: 1px solid var(--line); border-radius: 22px; padding: 16px; display: grid; gap: 14px; }
+.big {
+  width: 100%; min-height: 128px; border: 0; border-radius: 18px;
+  display: flex; align-items: center; justify-content: center; gap: 16px;
+  font: 700 30px/1 var(--font-display); letter-spacing: .04em; text-transform: uppercase;
+  transition: transform .08s ease;
+}
+.big:active { transform: scale(.98); }
+.big:disabled { opacity: .7; }
+.big.start { background: var(--accent); color: var(--accent-ink); }
+.big.stop { background: var(--run); color: #fff; min-height: 96px; }
+.big .ico { width: 44px; height: 44px; border-radius: 50%; border: 3px solid currentColor; display: grid; place-items: center; }
+.big .ico svg { width: 18px; height: 18px; fill: currentColor; }
+.odo-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.odo { display: inline-flex; gap: 3px; }
+.odo span { font: 500 18px/1 var(--font-mono); background: var(--ink); color: var(--surface); padding: 6px 5px; border-radius: 4px; min-width: 22px; text-align: center; }
+.odo span.unit { background: none; color: var(--muted); font: 500 14px var(--font-body); padding: 6px 2px; }
+.link { background: none; border: 0; color: var(--accent); font-weight: 600; padding: 8px 0; text-decoration: underline; text-underline-offset: 3px; }
+
+.run-head { display: flex; align-items: center; gap: 10px; font: 600 22px var(--font-display); text-transform: uppercase; letter-spacing: .03em; color: var(--run); }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--run); animation: pulse 1.4s infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .dot { animation: none; } .big { transition: none; } }
+.run-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+.run-grid .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+.run-grid .full { grid-column: 1 / -1; min-width: 0; }
+.hint { color: var(--muted); font-size: 14px; margin: 0; }
+
+.field { display: grid; gap: 4px; min-width: 0; }
+.field input, .field select, .field textarea {
+  width: 100%; border: 1px solid var(--line); background: var(--bg); border-radius: 10px; padding: 10px 12px; min-height: 44px;
+}
+.field input, .field select { min-width: 0; }
+.field textarea { min-height: 70px; resize: vertical; }
+.field.err input { border-color: var(--danger); }
+.field .msg { color: var(--danger); font-size: 13px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.row3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.seg button { border: 0; background: var(--bg); padding: 10px; min-height: 44px; font-weight: 600; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+
+.month h2 { font: 600 15px var(--font-display); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); display: flex; justify-content: space-between; margin: 8px 2px 8px; }
+.list { display: grid; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.trip { display: grid; grid-template-columns: 64px 1fr auto; gap: 12px; align-items: center; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); padding: 12px 14px; width: 100%; }
+.trip:first-child { border-top: 0; }
+.trip .d { font: 600 18px/1.1 var(--font-display); }
+.trip .d small { display: block; font: 400 13px var(--font-body); color: var(--muted); }
+.trip .r { min-width: 0; }
+.trip .r b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trip .r span { display: block; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trip .k { text-align: right; font: 600 18px var(--font-display); font-variant-numeric: tabular-nums; }
+.pill { display: inline-block; font: 600 11px var(--font-body); text-transform: uppercase; letter-spacing: .06em; padding: 2px 7px; border-radius: 99px; background: var(--soft); color: var(--muted); }
+.pill.draft { background: var(--run); color: #fff; }
+.empty { background: var(--surface); border: 1px dashed var(--line); border-radius: 16px; padding: 22px; color: var(--muted); text-align: center; }
+
+.tools { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.btn { border: 1px solid var(--line); background: var(--surface); border-radius: 12px; min-height: 48px; padding: 10px 14px; font-weight: 600; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.danger { color: var(--danger); }
+.btn.small { min-height: 36px; padding: 6px 10px; font-size: 14px; }
+
+/* Sheets */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 50; display: flex; align-items: flex-end; justify-content: center; }
+.sheet {
+  background: var(--surface); width: 100%; max-width: 600px; max-height: calc(100% - 24px - env(safe-area-inset-top, 0px));
+  overflow-y: auto; border-radius: 22px 22px 0 0;
+  padding: 18px max(16px, env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  display: grid; gap: 14px; overscroll-behavior: contain;
+}
+.sheet-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.sheet-head h3 { margin: 0; font: 700 22px var(--font-display); text-transform: uppercase; letter-spacing: .03em; }
+.calc { background: var(--soft); border-radius: 12px; padding: 10px 12px; font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.calc .opt { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.map { height: 260px; border-radius: 14px; overflow: hidden; background: var(--soft); }
+dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+.log { font-size: 13px; color: var(--muted); }
+.log li { margin-bottom: 2px; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.actions .btn { flex: 1 1 140px; }
+.confirm { background: var(--soft); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
+
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(20px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--surface); padding: 12px 16px; border-radius: 12px; z-index: 80; max-width: calc(100% - 32px); font-size: 15px; }
+.busy { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.45); display: grid; place-items: center; }
+.busy div { background: var(--surface); padding: 18px 22px; border-radius: 14px; font-weight: 600; }
+
+#print { display: none; }
+@media print {
+  body { background: #fff; color: #000; padding: 0; }
+  body > *:not(#print) { display: none !important; }
+  #print { display: block; font: 10pt/1.3 var(--font-body); color: #000; }
+  #print table { width: 100%; border-collapse: collapse; }
+  #print th, #print td { border: 1px solid #999; padding: 3px 4px; vertical-align: top; text-align: left; }
+  #print td.n, #print th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  #print h1 { font-size: 16pt; margin: 0 0 4px; }
+  @page { size: A4 landscape; margin: 12mm; }
+}
+@media (max-width: 380px) { .summary { grid-template-columns: 1fr 1fr; } .yearsw { grid-column: 1 / -1; } .row3 { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Fahrtenbuch</h1>
+      <div class="sub" id="vehicle"></div>
+    </div>
+    <button class="icon-btn" id="settingsBtn" aria-label="Einstellungen">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </header>
+
+  <section class="summary" id="summary"></section>
+  <section class="control" id="control"></section>
+  <section id="log"></section>
+  <section class="tools">
+    <button class="btn" id="exportBtn">Export &amp; PDF</button>
+    <button class="btn" id="backupBtn">Sicherung</button>
+  </section>
+</div>
+<div id="print"></div>
+<div id="sheetRoot"></div>
+<div id="toastRoot"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+<script>
+'use strict';
+/* ---------- helpers ---------- */
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = n => String(n).padStart(2, '0');
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+const num = v => { if (v === null || v === undefined || v === '') return null; const x = parseFloat(String(v).replace(/\s/g, '').replace(',', '.')); return Number.isFinite(x) ? x : null; };
+const fmtKm = n => (n ?? 0).toLocaleString('de-AT', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const fmtEur = n => (n ?? 0).toLocaleString('de-AT', { style: 'currency', currency: 'EUR' });
+const fmtInt = n => n == null ? '' : Math.round(n).toLocaleString('de-AT');
+const dateVal = t => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const timeVal = t => { const d = new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fromInputs = (date, time) => new Date(`${date}T${time || '00:00'}`).getTime();
+const dayLabel = t => new Date(t).toLocaleDateString('de-AT', { weekday: 'short', day: '2-digit', month: '2-digit' });
+const fullDate = t => new Date(t).toLocaleDateString('de-AT', { day: '2-digit', month: '2-digit', year: 'numeric' });
+const round1 = x => Math.round(x * 10) / 10;
+const KM_LIMIT = 30000;
+
+function hav(a, b) {
+  const R = 6371, r = x => x * Math.PI / 180;
+  const dLat = r(b[0] - a[0]), dLng = r(b[1] - a[1]);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(r(a[0])) * Math.cos(r(b[0])) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+function trackStats(tr) {
+  let km = 0, gap = 0;
+  for (let i = 1; i < tr.length; i++) { const d = hav(tr[i - 1], tr[i]); km += d; if (d > 1.5) gap += d; }
+  return { km, gapShare: km ? gap / km : 1 };
+}
+
+/* ---------- storage (IndexedDB, stays on this phone) ---------- */
+const store = {
+  db: null,
+  open() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('fahrtenbuch', 1);
+      r.onupgradeneeded = () => { r.result.createObjectStore('trips', { keyPath: 'id' }); r.result.createObjectStore('meta'); };
+      r.onsuccess = () => { this.db = r.result; res(); };
+      r.onerror = () => rej(r.error);
+    });
+  },
+  run(name, mode, fn) {
+    return new Promise((res, rej) => {
+      const t = this.db.transaction(name, mode);
+      const out = fn(t.objectStore(name));
+      t.oncomplete = () => res(out instanceof IDBRequest ? out.result : undefined);
+      t.onerror = () => rej(t.error);
+    });
+  },
+  trips() { return this.run('trips', 'readonly', s => s.getAll()); },
+  putTrip(t) { return this.run('trips', 'readwrite', s => { s.put(t); }); },
+  delTrip(id) { return this.run('trips', 'readwrite', s => { s.delete(id); }); },
+  get(k) { return this.run('meta', 'readonly', s => s.get(k)); },
+  set(k, v) { return this.run('meta', 'readwrite', s => { s.put(v, k); }); },
+};
+
+const S = {
+  trips: [],
+  settings: { name: '', vehicle: '', rate: 0.5, defaultType: 'dienstlich' },
+  active: null,
+  year: new Date().getFullYear(),
+  lastAcc: null,
+};
+
+/* ---------- online services (OpenStreetMap) ---------- */
+async function fetchJSON(url, ms = 9000) {
+  const c = new AbortController(); const timer = setTimeout(() => c.abort(), ms);
+  try { const r = await fetch(url, { signal: c.signal }); if (!r.ok) throw new Error(r.status); return await r.json(); }
+  finally { clearTimeout(timer); }
+}
+async function reverseGeocode(p) {
+  if (!p || p.lat == null) return '';
+  try {
+    const j = await fetchJSON(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&accept-language=de&zoom=18&addressdetails=1&lat=${p.lat}&lon=${p.lng}`);
+    const a = j.address || {};
+    const street = [a.road || a.pedestrian || a.footway || a.path || '', a.house_number || ''].join(' ').trim();
+    const city = [a.postcode || '', a.city || a.town || a.village || a.municipality || ''].join(' ').trim();
+    return [street, city].filter(Boolean).join(', ') || j.display_name || '';
+  } catch { return ''; }
+}
+async function geocode(q) {
+  try {
+    const j = await fetchJSON(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=de&q=${encodeURIComponent(q)}`);
+    return j[0] ? { lat: +j[0].lat, lng: +j[0].lon } : null;
+  } catch { return null; }
+}
+async function routeKm(a, b) {
+  if (!a || !b || a.lat == null || b.lat == null) return null;
+  try {
+    const j = await fetchJSON(`https://router.project-osrm.org/route/v1/driving/${a.lng},${a.lat};${b.lng},${b.lat}?overview=simplified&geometries=geojson`, 12000);
+    const r = j.routes && j.routes[0]; if (!r) return null;
+    return { km: r.distance / 1000, line: r.geometry.coordinates.map(c => [+c[1].toFixed(5), +c[0].toFixed(5)]) };
+  } catch { return null; }
+}
+function gmapsUrl(t) {
+  const s = t.start || {}, e = t.end || {};
+  if (s.lat == null || e.lat == null) {
+    if (s.addr && e.addr) return `https://www.google.com/maps/dir/?api=1&travelmode=driving&origin=${encodeURIComponent(s.addr)}&destination=${encodeURIComponent(e.addr)}`;
+    return null;
+  }
+  let wp = '';
+  const tr = t.track || [];
+  if (tr.length > 4) {
+    const n = Math.min(8, tr.length - 2), pts = [];
+    for (let i = 1; i <= n; i++) { const p = tr[Math.round(i * (tr.length - 1) / (n + 1))]; pts.push(p[0].toFixed(5) + ',' + p[1].toFixed(5)); }
+    wp = '&waypoints=' + encodeURIComponent(pts.join('|'));
+  }
+  return `https://www.google.com/maps/dir/?api=1&travelmode=driving&origin=${s.lat},${s.lng}&destination=${e.lat},${e.lng}${wp}`;
+}
+
+/* ---------- GPS ---------- */
+let watchId = null, wakeLock = null, lastSave = 0, tick = null;
+function getPos(timeout = 12000) {
+  return new Promise(res => {
+    if (!navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition(
+      p => res({ lat: +p.coords.latitude.toFixed(6), lng: +p.coords.longitude.toFixed(6), acc: Math.round(p.coords.accuracy) }),
+      () => res(null), { enableHighAccuracy: true, timeout, maximumAge: 10000 });
+  });
+}
+function startWatch() {
+  requestWake();
+  if (!navigator.geolocation || watchId !== null) return;
+  watchId = navigator.geolocation.watchPosition(onPos, () => {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+}
+function stopWatch() {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null;
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+async function requestWake() {
+  try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch {}
+}
+function onPos(p) {
+  const a = S.active; if (!a) return;
+  const c = p.coords; S.lastAcc = Math.round(c.accuracy);
+  if (c.accuracy <= 60) {
+    const pt = [+c.latitude.toFixed(6), +c.longitude.toFixed(6), Math.round(p.timestamp / 1000)];
+    const last = a.track[a.track.length - 1];
+    if (!last) a.track.push(pt);
+    else {
+      const d = hav(last, pt), dt = pt[2] - last[2];
+      const plausible = dt <= 0 ? d < 0.2 : d / dt * 3600 < 250;
+      if (d * 1000 >= Math.max(25, c.accuracy) && plausible) a.track.push(pt);
+    }
+    if (a.start.lat == null) { a.start.lat = pt[0]; a.start.lng = pt[1]; resolveStartAddr(); }
+  }
+  updateLive();
+  if (Date.now() - lastSave > 10000) { lastSave = Date.now(); saveActive(); }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!S.active) return;
+  if (document.visibilityState === 'visible') requestWake(); else saveActive();
+});
+
+/* ---------- data ---------- */
+const sortByTime = (a, b) => b.start.t - a.start.t;
+function lastTrip() { return [...S.trips].sort(sortByTime).find(t => t.odoEnd != null) || null; }
+function saveActive() { return store.set('active', S.active || null); }
+function yearsAvailable() { const ys = new Set(S.trips.map(t => new Date(t.start.t).getFullYear())); ys.add(new Date().getFullYear()); return [...ys].sort((a, b) => b - a); }
+function cityOf(addr) { if (!addr) return ''; const parts = addr.split(',').map(s => s.trim()); return (parts[parts.length - 1] || '').replace(/^\d{4,5}\s+/, ''); }
+function routeLabel(t) {
+  const a = t.start.addr, b = t.end?.addr;
+  if (!a && !b) return 'Ort fehlt';
+  const ca = cityOf(a), cb = cityOf(b);
+  if (ca && cb && ca === cb) return `${(a || '').split(',')[0]} → ${(b || '').split(',')[0]}`;
+  return `${ca || a || '?'} → ${cb || b || '?'}`;
+}
+
+/* ---------- rendering ---------- */
+function render() { renderSummary(); renderControl(); renderLog(); $('#vehicle').textContent = [S.settings.vehicle, S.settings.name].filter(Boolean).join(' · ') || 'Arbeitsfahrten für die Arbeitnehmerveranlagung'; }
+
+function renderSummary() {
+  const ts = S.trips.filter(t => !t.draft && t.type === 'dienstlich' && new Date(t.start.t).getFullYear() === S.year);
+  const km = ts.reduce((s, t) => s + (t.km || 0), 0);
+  const money = Math.min(km, KM_LIMIT) * (S.settings.rate || 0);
+  $('#summary').innerHTML = `
+    <div class="yearsw"><button id="yPrev" aria-label="Vorjahr">‹</button><span>${S.year}</span><button id="yNext" aria-label="Folgejahr">›</button></div>
+    <div class="stat"><span class="lbl">Dienstliche km</span><span class="val">${fmtKm(km)}</span></div>
+    <div class="stat"><span class="lbl">Kilometergeld</span><span class="val">${fmtEur(money)}</span>${km > KM_LIMIT ? `<span class="warn">Über 30.000 km, Rest nicht absetzbar</span>` : ''}</div>`;
+  $('#yPrev').onclick = () => { S.year--; render(); };
+  $('#yNext').onclick = () => { S.year++; render(); };
+}
+
+function odoHtml(v) {
+  if (v == null) return '<span class="hint">noch kein KM-Stand</span>';
+  const digits = String(Math.round(v)).padStart(6, '0').split('');
+  return `<span class="odo" aria-label="${fmtInt(v)} km">${digits.map(d => `<span>${d}</span>`).join('')}<span class="unit">km</span></span>`;
+}
+
+function renderControl() {
+  const el = $('#control');
+  clearInterval(tick);
+  if (!S.active) {
+    const last = lastTrip();
+    el.innerHTML = `
+      <button class="big start" id="startBtn"><span class="ico"><svg viewBox="0 0 18 18"><path d="M4 2l12 7-12 7z"/></svg></span><span id="startLbl">Fahrt starten</span></button>
+      <div class="odo-row"><div><span class="lbl">KM-Stand zuletzt</span>${odoHtml(last?.odoEnd)}</div>
+      <button class="link" id="manualBtn">Fahrt nachtragen</button></div>`;
+    $('#startBtn').onclick = startTrip;
+    $('#manualBtn').onclick = () => openTripForm(newManualTrip(), { isNew: true });
+    return;
+  }
+  const a = S.active;
+  el.innerHTML = `
+    <div class="run-head"><span class="dot"></span>Fahrt läuft · <span id="elapsed">0:00</span></div>
+    <div class="run-grid">
+      <div class="full"><span class="lbl">Start ${timeVal(a.start.t)}</span><span class="v" id="runStart">${esc(a.start.addr || (a.start.lat != null ? 'Adresse wird gesucht…' : 'Warte auf GPS…'))}</span></div>
+      <div><span class="lbl">GPS-Strecke</span><span class="v" id="liveKm">0,0 km</span></div>
+      <div><span class="lbl">GPS-Genauigkeit</span><span class="v" id="liveAcc">–</span></div>
+    </div>
+    <div class="seg" role="group" aria-label="Fahrtart">
+      <button data-type="dienstlich" aria-pressed="${a.type === 'dienstlich'}">Dienstlich</button>
+      <button data-type="privat" aria-pressed="${a.type === 'privat'}">Privat</button>
+    </div>
+    <div class="row2">
+      <label class="field"><span class="lbl">KM-Stand Beginn</span><input id="r_odo" inputmode="numeric" value="${a.odoStart ?? ''}" placeholder="z.B. 45213"></label>
+      <label class="field"><span class="lbl">Zweck / Kunde</span><input id="r_purpose" value="${esc(a.purpose)}" placeholder="kann auch am Ende"></label>
+    </div>
+    <button class="big stop" id="stopBtn"><span class="ico"><svg viewBox="0 0 18 18"><rect x="3" y="3" width="12" height="12"/></svg></span><span id="stopLbl">Fahrt beenden</span></button>
+    <p class="hint">Lass die App während der Fahrt geöffnet, der Bildschirm bleibt dafür an. Wird sie geschlossen, berechne ich die Strecke am Ende über die Route.</p>`;
+  el.querySelectorAll('.seg button').forEach(b => b.onclick = () => { a.type = b.dataset.type; saveActive(); el.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', x === b)); });
+  $('#r_odo').oninput = e => { a.odoStart = num(e.target.value); saveActive(); };
+  $('#r_purpose').oninput = e => { a.purpose = e.target.value; saveActive(); };
+  $('#stopBtn').onclick = stopTrip;
+  const upd = () => { const s = Math.floor((Date.now() - a.start.t) / 1000); const e = $('#elapsed'); if (e) e.textContent = `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`; };
+  upd(); tick = setInterval(upd, 1000);
+  updateLive();
+}
+function updateLive() {
+  if (!S.active) return;
+  const k = $('#liveKm'); if (k) k.textContent = fmtKm(trackStats(S.active.track).km) + ' km';
+  const ac = $('#liveAcc'); if (ac) ac.textContent = S.lastAcc != null ? `± ${S.lastAcc} m` : '–';
+}
+
+function renderLog() {
+  const ts = S.trips.filter(t => new Date(t.start.t).getFullYear() === S.year).sort(sortByTime);
+  if (!ts.length) {
+    $('#log').innerHTML = `<div class="empty">Noch keine Fahrten in ${S.year}.<br>Tippe auf <b>Fahrt starten</b>, wenn du losfährst.</div>`;
+    return;
+  }
+  const groups = new Map();
+  ts.forEach(t => { const d = new Date(t.start.t); const k = `${d.getFullYear()}-${d.getMonth()}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t); });
+  let html = '';
+  for (const list of groups.values()) {
+    const title = new Date(list[0].start.t).toLocaleDateString('de-AT', { month: 'long', year: 'numeric' });
+    const km = list.filter(t => t.type === 'dienstlich' && !t.draft).reduce((s, t) => s + (t.km || 0), 0);
+    html += `<div class="month"><h2><span>${title}</span><span>${fmtKm(km)} km dienstlich</span></h2><div class="list">` +
+      list.map(t => `<button class="trip" data-id="${t.id}">
+        <span class="d">${dayLabel(t.start.t)}<small>${timeVal(t.start.t)}${t.end ? '–' + timeVal(t.end.t) : ''}</small></span>
+        <span class="r"><b>${esc(routeLabel(t))}</b><span>${t.draft ? '<span class="pill draft">Zweck fehlt</span> ' : ''}${t.type === 'privat' ? '<span class="pill">Privat</span> ' : ''}${esc(t.purpose || '')}${t.client ? ' · ' + esc(t.client) : ''}</span></span>
+        <span class="k">${fmtKm(t.km)}<small class="lbl">km</small></span></button>`).join('') + `</div></div>`;
+  }
+  $('#log').innerHTML = html;
+  $('#log').querySelectorAll('.trip').forEach(b => b.onclick = () => openDetail(S.trips.find(t => t.id === b.dataset.id)));
+}
+
+/* ---------- sheets, toast, busy ---------- */
+function openSheet(html, mount) {
+  const root = $('#sheetRoot');
+  root.innerHTML = `<div class="scrim"><div class="sheet" role="dialog" aria-modal="true">${html}</div></div>`;
+  const scrim = root.firstElementChild;
+  scrim.addEventListener('click', e => { if (e.target === scrim) closeSheet(); });
+  root.querySelectorAll('[data-close]').forEach(b => b.onclick = closeSheet);
+  mount && mount(scrim.firstElementChild);
+}
+function closeSheet() { $('#sheetRoot').innerHTML = ''; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+let toastTimer;
+function toast(msg) { clearTimeout(toastTimer); $('#toastRoot').innerHTML = `<div class="toast" role="status">${esc(msg)}</div>`; toastTimer = setTimeout(() => $('#toastRoot').innerHTML = '', 4000); }
+function busy(msg) { const d = document.createElement('div'); d.className = 'busy'; d.innerHTML = `<div>${esc(msg)}</div>`; document.body.appendChild(d); return () => d.remove(); }
+
+/* ---------- start / stop ---------- */
+async function startTrip() {
+  const t0 = Date.now();
+  $('#startBtn').disabled = true; $('#startLbl').textContent = 'Standort wird gesucht…';
+  navigator.storage?.persist?.().catch(() => {});
+  const pos = await getPos(12000);
+  const last = lastTrip();
+  S.active = {
+    id: uid(), type: S.settings.defaultType || 'dienstlich', purpose: '', odoStart: last?.odoEnd ?? null,
+    start: { t: t0, lat: pos?.lat ?? null, lng: pos?.lng ?? null, acc: pos?.acc ?? null, addr: '' },
+    track: pos ? [[pos.lat, pos.lng, Math.round(t0 / 1000)]] : [],
+  };
+  await saveActive();
+  render(); startWatch();
+  if (!pos) toast('Noch kein GPS-Signal. Die Fahrt läuft trotzdem, der Standort wird nachgeholt.');
+  else resolveStartAddr();
+}
+async function resolveStartAddr() {
+  const a = S.active; if (!a || a.start.addr || a._resolving) return;
+  a._resolving = true;
+  const addr = await reverseGeocode(a.start);
+  delete a._resolving;
+  if (S.active === a && addr) { a.start.addr = addr; saveActive(); const el = $('#runStart'); if (el) el.textContent = addr; }
+}
+async function stopTrip() {
+  const a = S.active; if (!a) return;
+  const endT = Date.now();
+  $('#stopBtn').disabled = true; $('#stopLbl').textContent = 'Ziel wird gesucht…';
+  let pos = await getPos(10000);
+  stopWatch(); clearInterval(tick);
+  const lp = a.track[a.track.length - 1];
+  if (pos) { if (!lp || hav(lp, [pos.lat, pos.lng]) > 0.02) a.track.push([pos.lat, pos.lng, Math.round(endT / 1000)]); }
+  else if (lp) pos = { lat: lp[0], lng: lp[1], acc: null };
+  const done = busy('Adresse und Strecke werden ermittelt…');
+  const end = { t: endT, lat: pos?.lat ?? null, lng: pos?.lng ?? null, acc: pos?.acc ?? null, addr: '' };
+  const [sAddr, eAddr, rt] = await Promise.all([
+    a.start.addr ? a.start.addr : reverseGeocode(a.start), reverseGeocode(end), routeKm(a.start, end)]);
+  done();
+  const st = trackStats(a.track);
+  const gpsGood = a.track.length >= 5 && st.gapShare < 0.15;
+  let km = gpsGood ? st.km : (rt ? rt.km : st.km);
+  km = round1(km);
+  const trip = {
+    id: a.id, type: a.type, purpose: a.purpose || '', client: '', note: '',
+    start: { ...a.start, addr: sAddr || '' }, end: { ...end, addr: eAddr || '' },
+    track: a.track, routeLine: rt ? rt.line : null,
+    kmGps: round1(st.km), kmRoute: rt ? round1(rt.km) : null, kmSource: gpsGood ? 'GPS-Aufzeichnung' : (rt ? 'Routenberechnung' : 'GPS-Aufzeichnung (lückenhaft)'),
+    km, odoStart: a.odoStart, odoEnd: a.odoStart != null ? Math.round(a.odoStart + km) : null,
+    created: Date.now(), updated: Date.now(), changes: [], manual: false, draft: true,
+  };
+  await store.putTrip(trip);
+  S.trips.push(trip); S.active = null; await saveActive();
+  S.year = new Date(trip.start.t).getFullYear();
+  render();
+  openTripForm(trip, { isNew: true });
+}
+function newManualTrip() {
+  const now = Date.now(), last = lastTrip();
+  return {
+    id: uid(), type: S.settings.defaultType || 'dienstlich', purpose: '', client: '', note: '',
+    start: { t: now - 3600e3, lat: null, lng: null, addr: '' }, end: { t: now, lat: null, lng: null, addr: '' },
+    track: [], routeLine: null, kmGps: null, kmRoute: null, kmSource: 'Manuell',
+    km: null, odoStart: last?.odoEnd ?? null, odoEnd: null,
+    created: now, updated: now, changes: [], manual: true, draft: true, unsaved: true,
+  };
+}
+
+/* ---------- trip form ---------- */
+const FIELDS = [['date', 'Datum'], ['tStart', 'Beginn'], ['tEnd', 'Ende'], ['from', 'Abfahrtsort'], ['to', 'Zielort'], ['type', 'Fahrtart'], ['purpose', 'Zweck'], ['client', 'Kunde/Ort'], ['odoStart', 'KM-Stand Beginn'], ['odoEnd', 'KM-Stand Ende'], ['km', 'Gefahrene km'], ['note', 'Notiz']];
+function snapshot(t) {
+  return { date: dateVal(t.start.t), tStart: timeVal(t.start.t), tEnd: t.end ? timeVal(t.end.t) : '', from: t.start.addr || '', to: t.end?.addr || '', type: t.type, purpose: t.purpose || '', client: t.client || '', odoStart: t.odoStart ?? '', odoEnd: t.odoEnd ?? '', km: t.km ?? '', note: t.note || '' };
+}
+function openTripForm(trip, { isNew }) {
+  const v = snapshot(trip);
+  let type = trip.type;
+  const calcLine = () => {
+    const bits = [];
+    if (trip.kmGps != null && trip.track?.length > 1) bits.push(`<span class="opt">GPS: <b>${fmtKm(trip.kmGps)} km</b> <button type="button" class="btn small" data-use="${trip.kmGps}">übernehmen</button></span>`);
+    if (trip.kmRoute != null) bits.push(`<span class="opt">Route: <b>${fmtKm(trip.kmRoute)} km</b> <button type="button" class="btn small" data-use="${trip.kmRoute}">übernehmen</button></span>`);
+    return bits.join('') || 'Noch keine Strecke berechnet.';
+  };
+  openSheet(`
+    <div class="sheet-head"><h3>${isNew ? (trip.manual ? 'Fahrt nachtragen' : 'Fahrt abschließen') : 'Fahrt bearbeiten'}</h3><button class="btn small" data-close>Schließen</button></div>
+    <form id="tf" novalidate style="display:grid;gap:12px">
+      <div class="row3">
+        <label class="field"><span class="lbl">Datum</span><input id="f_date" type="date" value="${v.date}" required></label>
+        <label class="field"><span class="lbl">Beginn</span><input id="f_tStart" type="time" value="${v.tStart}"></label>
+        <label class="field"><span class="lbl">Ende</span><input id="f_tEnd" type="time" value="${v.tEnd}"></label>
+      </div>
+      <label class="field"><span class="lbl">Abfahrtsort</span><input id="f_from" value="${esc(v.from)}" placeholder="Straße, PLZ Ort" autocomplete="street-address"></label>
+      <label class="field"><span class="lbl">Zielort</span><input id="f_to" value="${esc(v.to)}" placeholder="Straße, PLZ Ort"></label>
+      <div class="seg" role="group" aria-label="Fahrtart">
+        <button type="button" data-type="dienstlich" aria-pressed="${type === 'dienstlich'}">Dienstlich</button>
+        <button type="button" data-type="privat" aria-pressed="${type === 'privat'}">Privat</button>
+      </div>
+      <label class="field" id="w_purpose"><span class="lbl">Zweck der Fahrt</span><input id="f_purpose" value="${esc(v.purpose)}" placeholder="z.B. Kundentermin, Baustelle, Schulung"><span class="msg" hidden>Für dienstliche Fahrten braucht das Finanzamt einen Zweck.</span></label>
+      <label class="field"><span class="lbl">Kunde / besuchte Stelle</span><input id="f_client" value="${esc(v.client)}" placeholder="optional"></label>
+      <div class="row3">
+        <label class="field"><span class="lbl">KM-Stand Beginn</span><input id="f_odoStart" inputmode="numeric" value="${v.odoStart}"></label>
+        <label class="field"><span class="lbl">KM-Stand Ende</span><input id="f_odoEnd" inputmode="numeric" value="${v.odoEnd}"></label>
+        <label class="field" id="w_km"><span class="lbl">Gefahrene km</span><input id="f_km" inputmode="decimal" value="${v.km === '' ? '' : String(v.km).replace('.', ',')}"><span class="msg" hidden>Bitte km eintragen.</span></label>
+      </div>
+      <div class="calc" id="calc">${calcLine()}${trip.manual ? ' <button type="button" class="btn small" id="calcRoute">Strecke aus Adressen berechnen</button>' : ''}</div>
+      <label class="field"><span class="lbl">Notiz</span><textarea id="f_note">${esc(v.note)}</textarea></label>
+      <div class="actions">
+        <button class="btn primary" type="submit">Speichern</button>
+        ${isNew ? `<button class="btn danger" type="button" id="discard">${trip.manual ? 'Abbrechen' : 'Fahrt verwerfen'}</button>` : ''}
+      </div>
+      <div class="confirm" id="discardConfirm" hidden><span>Diese Fahrt wirklich verwerfen?</span><div class="actions"><button class="btn danger" type="button" id="discardYes">Ja, verwerfen</button><button class="btn" type="button" id="discardNo">Behalten</button></div></div>
+    </form>`, sheet => {
+    const f = id => sheet.querySelector('#f_' + id);
+    sheet.querySelectorAll('.seg button').forEach(b => b.onclick = () => { type = b.dataset.type; sheet.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', x === b)); });
+    const syncFromKm = () => { const s = num(f('odoStart').value), k = num(f('km').value); if (s != null && k != null) f('odoEnd').value = Math.round(s + k); };
+    f('km').oninput = syncFromKm;
+    f('odoStart').oninput = syncFromKm;
+    f('odoEnd').oninput = () => { const s = num(f('odoStart').value), e = num(f('odoEnd').value); if (s != null && e != null && e >= s) f('km').value = String(e - s).replace('.', ','); };
+    const bindUse = () => sheet.querySelectorAll('[data-use]').forEach(b => b.onclick = () => { f('km').value = String(b.dataset.use).replace('.', ','); syncFromKm(); });
+    bindUse();
+    const cr = sheet.querySelector('#calcRoute');
+    if (cr) cr.onclick = async () => {
+      const a = f('from').value.trim(), b = f('to').value.trim();
+      if (!a || !b) { toast('Bitte zuerst Abfahrts- und Zielort eintragen.'); return; }
+      const done = busy('Strecke wird berechnet…');
+      const [pa, pb] = await Promise.all([geocode(a), geocode(b)]);
+      const rt = pa && pb ? await routeKm(pa, pb) : null;
+      done();
+      if (!rt) { toast('Strecke konnte nicht berechnet werden. Prüfe die Adressen oder trage die km selbst ein.'); return; }
+      trip.start.lat = pa.lat; trip.start.lng = pa.lng; trip.end.lat = pb.lat; trip.end.lng = pb.lng;
+      trip.kmRoute = round1(rt.km); trip.routeLine = rt.line; trip.kmSource = 'Routenberechnung (Adressen)';
+      f('km').value = String(trip.kmRoute).replace('.', ','); syncFromKm();
+      sheet.querySelector('#calc').innerHTML = calcLine() + ' <button type="button" class="btn small" id="calcRoute">Neu berechnen</button>';
+      bindUse(); sheet.querySelector('#calcRoute').onclick = cr.onclick;
+    };
+    const disc = sheet.querySelector('#discard');
+    if (disc) {
+      disc.onclick = () => { if (trip.unsaved) { closeSheet(); return; } sheet.querySelector('#discardConfirm').hidden = false; };
+      sheet.querySelector('#discardYes').onclick = async () => { await store.delTrip(trip.id); S.trips = S.trips.filter(t => t.id !== trip.id); closeSheet(); render(); toast('Fahrt verworfen.'); };
+      sheet.querySelector('#discardNo').onclick = () => { sheet.querySelector('#discardConfirm').hidden = true; };
+    }
+    sheet.querySelector('#tf').onsubmit = async e => {
+      e.preventDefault();
+      const km = num(f('km').value), purpose = f('purpose').value.trim();
+      const pErr = type === 'dienstlich' && !purpose, kErr = km == null;
+      sheet.querySelector('#w_purpose').classList.toggle('err', pErr); sheet.querySelector('#w_purpose .msg').hidden = !pErr;
+      sheet.querySelector('#w_km').classList.toggle('err', kErr); sheet.querySelector('#w_km .msg').hidden = !kErr;
+      if (pErr || kErr) return;
+      const date = f('date').value || dateVal(trip.start.t);
+      const sT = fromInputs(date, f('tStart').value);
+      let eT = fromInputs(date, f('tEnd').value || f('tStart').value);
+      if (eT < sT) eT += 864e5;
+      const before = snapshot(trip);
+      trip.start.t = sT; trip.end = trip.end || {}; trip.end.t = eT;
+      trip.start.addr = f('from').value.trim(); trip.end.addr = f('to').value.trim();
+      trip.type = type; trip.purpose = purpose; trip.client = f('client').value.trim(); trip.note = f('note').value.trim();
+      trip.odoStart = num(f('odoStart').value); trip.odoEnd = num(f('odoEnd').value); trip.km = round1(km);
+      if (!isNew) {
+        const after = snapshot(trip), now = Date.now();
+        FIELDS.forEach(([k, label]) => { if (String(before[k]) !== String(after[k])) trip.changes.push({ t: now, f: label, a: String(before[k]), b: String(after[k]) }); });
+      }
+      const wasUnsaved = trip.unsaved;
+      delete trip.unsaved; trip.draft = false; trip.updated = Date.now();
+      await store.putTrip(trip);
+      if (wasUnsaved) S.trips.push(trip);
+      S.year = new Date(trip.start.t).getFullYear();
+      closeSheet(); render(); toast('Fahrt gespeichert.');
+    };
+  });
+}
+
+/* ---------- detail ---------- */
+function openDetail(t) {
+  if (!t) return;
+  if (t.draft) { openTripForm(t, { isNew: true }); return; }
+  const g = gmapsUrl(t);
+  const hasGeo = (t.track && t.track.length > 1) || (t.routeLine && t.routeLine.length > 1);
+  openSheet(`
+    <div class="sheet-head"><h3>${dayLabel(t.start.t)} ${new Date(t.start.t).getFullYear()}</h3><button class="btn small" data-close>Schließen</button></div>
+    ${hasGeo ? '<div class="map" id="map"></div>' : ''}
+    <dl class="kv">
+      <dt>Zeit</dt><dd>${timeVal(t.start.t)} – ${t.end ? timeVal(t.end.t) : '?'}</dd>
+      <dt>Von</dt><dd>${esc(t.start.addr || '–')}</dd>
+      <dt>Nach</dt><dd>${esc(t.end?.addr || '–')}</dd>
+      <dt>Fahrtart</dt><dd>${t.type === 'privat' ? 'Privat' : 'Dienstlich'}</dd>
+      <dt>Zweck</dt><dd>${esc(t.purpose || '–')}</dd>
+      ${t.client ? `<dt>Kunde</dt><dd>${esc(t.client)}</dd>` : ''}
+      <dt>KM-Stand</dt><dd>${t.odoStart != null ? fmtInt(t.odoStart) : '–'} → ${t.odoEnd != null ? fmtInt(t.odoEnd) : '–'}</dd>
+      <dt>Strecke</dt><dd>${fmtKm(t.km)} km <span class="hint">(${esc(t.kmSource || '')}${t.kmGps != null && t.track?.length > 1 ? ', GPS ' + fmtKm(t.kmGps) : ''}${t.kmRoute != null ? ', Route ' + fmtKm(t.kmRoute) : ''})</span></dd>
+      ${t.type === 'dienstlich' ? `<dt>Kilometergeld</dt><dd>${fmtEur((t.km || 0) * (S.settings.rate || 0))}</dd>` : ''}
+      ${t.note ? `<dt>Notiz</dt><dd>${esc(t.note)}</dd>` : ''}
+      <dt>Erfasst</dt><dd>${new Date(t.created).toLocaleString('de-AT')}${t.manual ? ' (nachgetragen)' : ' (live per GPS)'}</dd>
+    </dl>
+    ${t.changes?.length ? `<div><span class="lbl">Änderungsprotokoll</span><ul class="log">${t.changes.map(c => `<li>${new Date(c.t).toLocaleString('de-AT')}: ${esc(c.f)} „${esc(c.a)}“ → „${esc(c.b)}“</li>`).join('')}</ul></div>` : ''}
+    <div class="actions">
+      ${g ? `<a class="btn" style="text-align:center;text-decoration:none;display:grid;place-items:center" href="${esc(g)}" target="_blank" rel="noopener">In Google Maps öffnen</a>` : ''}
+      <button class="btn" id="editBtn">Bearbeiten</button>
+      <button class="btn danger" id="delBtn">Löschen</button>
+    </div>
+    <div class="confirm" id="delConfirm" hidden><span>Fahrt endgültig löschen?</span><div class="actions"><button class="btn danger" id="delYes">Ja, löschen</button><button class="btn" id="delNo">Abbrechen</button></div></div>`, sheet => {
+    sheet.querySelector('#editBtn').onclick = () => openTripForm(t, { isNew: false });
+    sheet.querySelector('#delBtn').onclick = () => { sheet.querySelector('#delConfirm').hidden = false; };
+    sheet.querySelector('#delNo').onclick = () => { sheet.querySelector('#delConfirm').hidden = true; };
+    sheet.querySelector('#delYes').onclick = async () => { await store.delTrip(t.id); S.trips = S.trips.filter(x => x.id !== t.id); closeSheet(); render(); toast('Fahrt gelöscht.'); };
+    if (hasGeo) drawMap(sheet.querySelector('#map'), t);
+  });
+}
+function drawMap(el, t) {
+  if (!window.L) { el.innerHTML = '<p class="hint" style="padding:12px">Karte nicht verfügbar (offline?).</p>'; return; }
+  const css = getComputedStyle(document.documentElement);
+  const map = L.map(el, { zoomControl: false, attributionControl: true });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  const gps = t.track && t.track.length > 1 ? t.track.map(p => [p[0], p[1]]) : null;
+  const layers = [];
+  if (t.routeLine && t.routeLine.length > 1) layers.push(L.polyline(t.routeLine, { color: css.getPropertyValue('--muted').trim() || '#666', weight: 4, dashArray: '6 8', opacity: .8 }));
+  if (gps) layers.push(L.polyline(gps, { color: css.getPropertyValue('--accent').trim() || '#0e6b50', weight: 5 }));
+  const s = t.start, e = t.end;
+  if (s?.lat != null) layers.push(L.circleMarker([s.lat, s.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#0e6b50', fillOpacity: 1 }).bindTooltip('Start'));
+  if (e?.lat != null) layers.push(L.circleMarker([e.lat, e.lng], { radius: 7, color: '#fff', weight: 2, fillColor: '#c2410c', fillOpacity: 1 }).bindTooltip('Ziel'));
+  const grp = L.featureGroup(layers).addTo(map);
+  setTimeout(() => { map.invalidateSize(); try { map.fitBounds(grp.getBounds(), { padding: [24, 24] }); } catch { map.setView([47.6, 13.8], 7); } }, 50);
+}
+
+/* ---------- export ---------- */
+function yearTrips(y) { return S.trips.filter(t => !t.draft && new Date(t.start.t).getFullYear() === y).sort((a, b) => a.start.t - b.start.t); }
+async function deliverFile(name, blob) {
+  const file = new File([blob], name, { type: blob.type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+function csvFor(y) {
+  const q = v => { const s = String(v ?? ''); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const dec = n => n == null ? '' : String(round1(n)).replace('.', ',');
+  const rate = S.settings.rate || 0;
+  const head = ['Datum', 'Beginn', 'Ende', 'Abfahrtsort', 'Zielort', 'Zweck der Fahrt', 'Kunde/besuchte Stelle', 'Fahrtart', 'KM-Stand Beginn', 'KM-Stand Ende', 'Gefahrene km', 'Kilometergeld EUR', 'Erfassung', 'Geändert'];
+  const rows = yearTrips(y).map(t => [fullDate(t.start.t), timeVal(t.start.t), t.end ? timeVal(t.end.t) : '', t.start.addr, t.end?.addr, t.purpose, t.client, t.type === 'privat' ? 'privat' : 'dienstlich', t.odoStart ?? '', t.odoEnd ?? '', dec(t.km), t.type === 'dienstlich' ? ((t.km || 0) * rate).toFixed(2).replace('.', ',') : '', t.manual ? 'nachgetragen' : 'GPS live', t.changes?.length ? 'ja (' + t.changes.length + ')' : 'nein']);
+  const dk = yearTrips(y).filter(t => t.type === 'dienstlich').reduce((s, t) => s + (t.km || 0), 0);
+  rows.push([]); rows.push(['Summe dienstlich', '', '', '', '', '', '', '', '', '', dec(dk), (Math.min(dk, KM_LIMIT) * rate).toFixed(2).replace('.', ',')]);
+  return '﻿' + [head, ...rows].map(r => r.map(q).join(';')).join('\r\n');
+}
+function buildPrint(y) {
+  const ts = yearTrips(y), rate = S.settings.rate || 0;
+  const dk = ts.filter(t => t.type === 'dienstlich').reduce((s, t) => s + (t.km || 0), 0);
+  $('#print').innerHTML = `<h1>Fahrtenbuch ${y}</h1>
+    <p>${esc(S.settings.name || '')}${S.settings.vehicle ? ' · Fahrzeug: ' + esc(S.settings.vehicle) : ''} · Kilometergeld ${fmtEur(rate)}/km</p>
+    <table><thead><tr><th>Datum</th><th>Zeit</th><th>Von</th><th>Nach</th><th>Zweck / Kunde</th><th>Art</th><th class="n">KM-Stand Beginn</th><th class="n">KM-Stand Ende</th><th class="n">km</th><th class="n">€</th></tr></thead><tbody>
+    ${ts.map(t => `<tr><td>${fullDate(t.start.t)}</td><td>${timeVal(t.start.t)}–${t.end ? timeVal(t.end.t) : ''}</td><td>${esc(t.start.addr)}</td><td>${esc(t.end?.addr)}</td><td>${esc(t.purpose)}${t.client ? ' / ' + esc(t.client) : ''}${t.changes?.length ? ' *' : ''}</td><td>${t.type === 'privat' ? 'privat' : 'dienstl.'}</td><td class="n">${fmtInt(t.odoStart)}</td><td class="n">${fmtInt(t.odoEnd)}</td><td class="n">${fmtKm(t.km)}</td><td class="n">${t.type === 'dienstlich' ? fmtEur((t.km || 0) * rate) : ''}</td></tr>`).join('')}
+    <tr><td colspan="8"><b>Summe dienstlich</b></td><td class="n"><b>${fmtKm(dk)}</b></td><td class="n"><b>${fmtEur(Math.min(dk, KM_LIMIT) * rate)}</b></td></tr>
+    </tbody></table>
+    <p>* nachträglich geändert, Änderungen sind in der App je Fahrt protokolliert. Erstellt am ${new Date().toLocaleString('de-AT')}.</p>`;
+}
+function openExport() {
+  const ys = yearsAvailable();
+  openSheet(`
+    <div class="sheet-head"><h3>Export</h3><button class="btn small" data-close>Schließen</button></div>
+    <label class="field"><span class="lbl">Jahr</span><select id="x_year">${ys.map(y => `<option ${y === S.year ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
+    <p class="hint" id="x_info"></p>
+    <div class="actions">
+      <button class="btn primary" id="x_csv">Excel-Tabelle (CSV)</button>
+      <button class="btn" id="x_pdf">Druckansicht / PDF</button>
+    </div>
+    <p class="hint">Am iPhone: Druckansicht öffnen, dann im Druckmenü mit zwei Fingern auf die Vorschau aufziehen, um ein PDF zu teilen oder zu sichern.</p>`, sheet => {
+    const sel = sheet.querySelector('#x_year');
+    const info = () => { const y = +sel.value, ts = yearTrips(y), dk = ts.filter(t => t.type === 'dienstlich').reduce((s, t) => s + (t.km || 0), 0); sheet.querySelector('#x_info').textContent = `${ts.length} Fahrten, ${fmtKm(dk)} km dienstlich, Kilometergeld ${fmtEur(Math.min(dk, KM_LIMIT) * (S.settings.rate || 0))}.`; };
+    sel.onchange = info; info();
+    sheet.querySelector('#x_csv').onclick = () => deliverFile(`Fahrtenbuch_${sel.value}.csv`, new Blob([csvFor(+sel.value)], { type: 'text/csv;charset=utf-8' }));
+    sheet.querySelector('#x_pdf').onclick = () => { buildPrint(+sel.value); window.print(); };
+  });
+}
+function openBackup() {
+  openSheet(`
+    <div class="sheet-head"><h3>Sicherung</h3><button class="btn small" data-close>Schließen</button></div>
+    <p class="hint">Deine Fahrten sind nur auf diesem Handy gespeichert. Speichere regelmäßig eine Sicherung, z.B. in iCloud Drive, damit nichts verloren geht.</p>
+    <div class="actions">
+      <button class="btn primary" id="b_save">Sicherung speichern</button>
+      <label class="btn" style="display:grid;place-items:center">Sicherung laden<input type="file" id="b_load" accept=".json,application/json" hidden></label>
+    </div>`, sheet => {
+    sheet.querySelector('#b_save').onclick = () => deliverFile(`Fahrtenbuch_Sicherung_${dateVal(Date.now())}.json`, new Blob([JSON.stringify({ app: 'fahrtenbuch', version: 1, exported: Date.now(), settings: S.settings, trips: S.trips }, null, 1)], { type: 'application/json' }));
+    sheet.querySelector('#b_load').onchange = async e => {
+      const file = e.target.files[0]; if (!file) return;
+      try {
+        const data = JSON.parse(await file.text());
+        if (data.app !== 'fahrtenbuch' || !Array.isArray(data.trips)) throw new Error('format');
+        let added = 0, updated = 0;
+        for (const t of data.trips) {
+          const cur = S.trips.find(x => x.id === t.id);
+          if (!cur) { S.trips.push(t); await store.putTrip(t); added++; }
+          else if ((t.updated || 0) > (cur.updated || 0)) { Object.assign(cur, t); await store.putTrip(cur); updated++; }
+        }
+        if (data.settings && !S.settings.name && !S.settings.vehicle) { S.settings = { ...S.settings, ...data.settings }; await store.set('settings', S.settings); }
+        closeSheet(); render(); toast(`${added} Fahrten übernommen, ${updated} aktualisiert.`);
+      } catch { toast('Diese Datei ist keine Fahrtenbuch-Sicherung.'); }
+    };
+  });
+}
+function openSettings() {
+  const s = S.settings;
+  openSheet(`
+    <div class="sheet-head"><h3>Einstellungen</h3><button class="btn small" data-close>Schließen</button></div>
+    <form id="sf" style="display:grid;gap:12px">
+      <label class="field"><span class="lbl">Name</span><input id="s_name" value="${esc(s.name)}" autocomplete="name"></label>
+      <label class="field"><span class="lbl">Fahrzeug / Kennzeichen</span><input id="s_vehicle" value="${esc(s.vehicle)}" placeholder="z.B. VW Golf, W-12345X"></label>
+      <div class="row2">
+        <label class="field"><span class="lbl">Kilometergeld € pro km</span><input id="s_rate" inputmode="decimal" value="${String(s.rate).replace('.', ',')}"></label>
+        <label class="field"><span class="lbl">Standard-Fahrtart</span><select id="s_type"><option value="dienstlich" ${s.defaultType === 'dienstlich' ? 'selected' : ''}>Dienstlich</option><option value="privat" ${s.defaultType === 'privat' ? 'selected' : ''}>Privat</option></select></label>
+      </div>
+      <p class="hint">Amtliches Kilometergeld für PKW seit 2025: 0,50 € pro km, höchstens 30.000 km im Jahr. Fahrten zwischen Wohnung und Arbeitsplatz gehören nicht ins Fahrtenbuch, dafür gibt es die Pendlerpauschale.</p>
+      <button class="btn primary" type="submit">Speichern</button>
+    </form>`, sheet => {
+    sheet.querySelector('#sf').onsubmit = async e => {
+      e.preventDefault();
+      S.settings = { name: sheet.querySelector('#s_name').value.trim(), vehicle: sheet.querySelector('#s_vehicle').value.trim(), rate: num(sheet.querySelector('#s_rate').value) ?? 0.5, defaultType: sheet.querySelector('#s_type').value };
+      await store.set('settings', S.settings); closeSheet(); render(); toast('Einstellungen gespeichert.');
+    };
+  });
+}
+
+/* ---------- boot ---------- */
+(async function boot() {
+  try {
+    await store.open();
+    S.trips = (await store.trips()) || [];
+    S.settings = { ...S.settings, ...((await store.get('settings')) || {}) };
+    S.active = (await store.get('active')) || null;
+  } catch (e) { toast('Speicher nicht verfügbar. Bitte nicht im privaten Modus öffnen.'); }
+  $('#settingsBtn').onclick = openSettings;
+  $('#exportBtn').onclick = openExport;
+  $('#backupBtn').onclick = openBackup;
+  render();
+  if (S.active) { startWatch(); if (!S.active.start.addr) resolveStartAddr(); }
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+</script>
+</body>
+</html>
