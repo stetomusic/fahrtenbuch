@@ -181,6 +181,19 @@ dl.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
 .choice .link { justify-self: center; }
 .updbar { position: fixed; left: 0; right: 0; top: 0; z-index: 85; background: var(--accent); color: var(--accent-ink); display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: calc(10px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px)); font-weight: 600; }
 .updbar button { background: var(--accent-ink); color: var(--accent); border: 0; border-radius: 10px; padding: 8px 12px; font-weight: 700; }
+.scanner { position: fixed; inset: 0; z-index: 95; background: #000; color: #fff; overflow: hidden; }
+.scanner video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.scan-frame { position: absolute; left: 8%; right: 8%; top: 39%; height: 11%; border: 3px solid #fff; border-radius: 12px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.6); transition: border-color .2s; z-index: 1; }
+.scan-frame.ok { border-color: #3cbf8e; }
+.scan-top { position: absolute; z-index: 2; left: 0; right: 0; top: 0; padding: calc(18px + env(safe-area-inset-top, 0px)) 20px 0; display: grid; gap: 4px; text-align: center; }
+.scan-top b { font: 700 24px var(--font-display); text-transform: uppercase; letter-spacing: .04em; }
+.scan-bottom { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; padding: 0 max(16px, env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 14px; }
+.scan-read { text-align: center; font: 500 30px var(--font-mono); min-height: 40px; font-variant-numeric: tabular-nums; }
+.scan-read.msg { font: 500 17px var(--font-body); }
+.scan-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.scan-actions .btn { background: rgba(255,255,255,.14); color: #fff; border-color: rgba(255,255,255,.3); }
+.scan-actions .btn.primary { grid-column: 1 / -1; min-height: 58px; font-size: 19px; background: #3cbf8e; color: #06231a; border-color: #3cbf8e; }
+.scan-actions .btn:disabled { opacity: .45; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(20px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--surface); padding: 12px 16px; border-radius: 12px; z-index: 80; max-width: calc(100% - 32px); font-size: 15px; }
 .busy { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.45); display: grid; place-items: center; }
 .busy div { background: var(--surface); padding: 18px 22px; border-radius: 14px; font-weight: 600; }
@@ -340,6 +353,7 @@ function odoCandidates(text, expected) {
 }
 async function readOdometer(img, expected) {
   const w = await getOcr();
+  await w.setParameters({ tessedit_pageseg_mode: '11' });
   let r = await w.recognize(prepForOcr(img, false));
   let c = odoCandidates(r.data.text, expected);
   if (!c.length || (expected != null && !(c[0] >= expected && c[0] <= expected + 5000))) {
@@ -360,7 +374,211 @@ function odoFieldHtml(id, label, value, key, has) {
 }
 // Wire camera buttons: photo -> stored -> number read -> filled into the input (user confirms)
 function bindCams(root, expectedFor, onPhoto) {
-  root.querySelectorAll('[data-cam]').forEach(btn => btn.onclick = () => pickPhoto(file => processOdoPhoto(file, root, btn.dataset.cam, expectedFor, onPhoto)));
+  root.querySelectorAll('[data-cam]').forEach(btn => btn.onclick = () => runCamRequest(camRequest(), { root, expected: expectedFor, onPhoto }, btn.dataset.cam));
+}
+
+/* ---------- live scanner: only the framed strip is read ---------- */
+let scannerBroken = !(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+// Must run inside a tap: the photo fallback can only open the camera from a tap.
+function camRequest() { return scannerBroken ? { file: new Promise(r => pickPhoto(r)) } : { live: true }; }
+function runCamRequest(req, ctx, inputId) {
+  if (!ctx || !req) return;
+  if (req.file) req.file.then(f => processOdoPhoto(f, ctx.root, inputId, ctx.expected, ctx.onPhoto));
+  else scanInto(ctx.root, inputId, ctx.expected, ctx.onPhoto);
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function otsu(hist, n) {
+  let sum = 0; for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0, wB = 0, max = -1, th = 127;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (!wB) continue; const wF = n - wB; if (!wF) break;
+    sumB += t * hist[t]; const mB = sumB / wB, mF = (sum - sumB) / wF, b = wB * wF * (mB - mF) ** 2;
+    if (b > max) { max = b; th = t; }
+  }
+  return th;
+}
+// Scale the strip to a fixed height, binarize, make digits dark on white
+function prepStrip(src, invert = false) {
+  const H = 90, W = Math.max(40, Math.min(1400, Math.round(src.width * H / src.height))), pad = 20;
+  const c = document.createElement('canvas'); c.width = W + pad * 2; c.height = H + pad * 2;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, pad, pad, W, H);
+  const d = ctx.getImageData(pad, pad, W, H), p = d.data, n = W * H, g = new Uint8Array(n), hist = new Uint32Array(256);
+  for (let i = 0, j = 0; j < n; i += 4, j++) { g[j] = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000; hist[g[j]]++; }
+  const th = otsu(hist, n);
+  let light = 0, border = 0;
+  for (let x = 0; x < W; x++) { for (const y of [0, H - 1]) { border++; if (g[y * W + x] > th) light++; } }
+  for (let y = 0; y < H; y++) { for (const x of [0, W - 1]) { border++; if (g[y * W + x] > th) light++; } }
+  const darkBg = (light < border / 2) !== invert;
+  for (let i = 0, j = 0; j < n; i += 4, j++) { const on = g[j] > th; const v = (on !== darkBg) ? 255 : 0; p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.putImageData(d, pad, pad);
+  return c;
+}
+// Decoder for 7-segment LCD odometers (common in cars), which general text recognition reads badly.
+// Input: output of prepStrip (dark digits on white). Returns the digit string of the main text line.
+const SEG_DIGITS = { '1111110': '0', '0110000': '1', '1101101': '2', '1111001': '3', '0110011': '4', '1011011': '5', '1011111': '6', '0011111': '6', '1110000': '7', '1110010': '7', '1111111': '8', '1111011': '9', '1110011': '9' };
+function readSevenSeg(strip) {
+  const W = strip.width, H = strip.height, d = strip.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  let ink = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) ink[i] = d[i * 4] < 128 ? 1 : 0;
+  // remove ink touching the edge of the framed area (display bezel, dashboard)
+  const pad = 20, stack = [];
+  for (let x = pad; x < W - pad; x++) stack.push(pad * W + x, (H - pad - 1) * W + x);
+  for (let y = pad; y < H - pad; y++) stack.push(y * W + pad, y * W + W - pad - 1);
+  // only large edge shapes are removed, so a digit that touches the frame survives
+  const seen = new Uint8Array(W * H);
+  for (const start of stack) {
+    if (!ink[start] || seen[start]) continue;
+    const comp = [start], q = [start]; seen[start] = 1;
+    let x0 = W, x1 = 0, y0 = H, y1 = 0;
+    while (q.length) {
+      const i = q.pop(), x = i % W, y = (i / W) | 0;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) if (j >= 0 && ink[j] && !seen[j]) { seen[j] = 1; q.push(j); comp.push(j); }
+    }
+    const IW = W - 2 * pad, IH = H - 2 * pad, cutLine = (y0 <= pad || y1 >= H - pad - 1) && y1 - y0 < IH * 0.35;  // remains of a neighbouring line
+    if (cutLine || x1 - x0 > IW * 0.4 || y1 - y0 > IH * 0.8 || comp.length > IW * IH * 0.08) comp.forEach(i => { ink[i] = 0; });
+  }
+  // undo italic slant: pick the shear that leaves the most empty columns
+  const shear = sh => { const o = new Uint8Array(W * H), yc = H / 2; for (let y = 0; y < H; y++) { const dx = Math.round(sh * (y - yc)); for (let x = 0; x < W; x++) if (ink[y * W + x]) { const nx = x + dx; if (nx >= 0 && nx < W) o[y * W + nx] = 1; } } return o; };
+  const usedCols = a => { let n = 0; for (let x = 0; x < W; x++) { for (let y = 0; y < H; y++) if (a[y * W + x]) { n++; break; } } return n; };
+  let bestInk = ink, bestCols = usedCols(ink);
+  for (const sh of [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, -0.05, -0.1]) { const a = shear(sh), u = usedCols(a); if (u < bestCols) { bestCols = u; bestInk = a; } }
+  ink = bestInk;
+  // 1) main text band: rows with ink, small gaps bridged, pick band with most ink
+  const rows = new Array(H).fill(0);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) rows[y] += ink[y * W + x];
+  const rowMin = Math.max(1, Math.max(...rows) * 0.12);
+  const bands = []; let cur = null, gap = 0;
+  for (let y = 0; y < H; y++) {
+    if (rows[y] > rowMin) { if (!cur) cur = { y0: y, y1: y, sum: 0 }; cur.y1 = y; cur.sum += rows[y]; gap = 0; }
+    else if (cur && ++gap > Math.max(1, H * 0.015)) { bands.push(cur); cur = null; gap = 0; }
+  }
+  if (cur) bands.push(cur);
+  let bestOut = '';
+  for (const band of bands.filter(b => b.y1 - b.y0 > H * 0.15)) {
+    const o = decodeBand(band);
+    if (o.replace(/\?/g, '').length > bestOut.replace(/\?/g, '').length) bestOut = o;
+  }
+  return bestOut;
+  function decodeBand(band) {
+  const bh = band.y1 - band.y0 + 1;
+  // 2) digit blobs by column projection, bridging small gaps inside a digit
+  const cols = new Array(W).fill(0);
+  for (let x = 0; x < W; x++) for (let y = band.y0; y <= band.y1; y++) cols[x] += ink[y * W + x];
+  const blobs = []; let b = null; gap = 0;
+  for (let x = 0; x < W; x++) {
+    if (cols[x] > 0) { if (!b) b = { x0: x, x1: x }; b.x1 = x; gap = 0; }
+    else if (b && ++gap > Math.max(1, bh * 0.07)) { blobs.push(b); b = null; gap = 0; }
+  }
+  if (b) blobs.push(b);
+  let out = '';
+  for (const bl of blobs) {
+    // vertical extent = longest run of inked rows (drops dots or bits of a neighbouring line)
+    let t = H, btm = -1, rs = -1, re = -1, g = 0;
+    const tol = Math.max(2, Math.round(bh * 0.05));
+    for (let y = band.y0; y <= band.y1 + tol + 1; y++) {
+      let any = false; if (y <= band.y1) for (let x = bl.x0; x <= bl.x1; x++) if (ink[y * W + x]) { any = true; break; }
+      if (any) { if (rs < 0) rs = y; re = y; g = 0; }
+      else if (rs >= 0 && ++g > tol) { if (re - rs > btm - t) { t = rs; btm = re; } rs = -1; g = 0; }
+    }
+    const h = btm - t + 1, w = bl.x1 - bl.x0 + 1;
+    if (h < bh * 0.6 || w > h * 1.1) continue;          // dots, borders, noise
+    if (w < h * 0.3) { out += '1'; continue; }
+    const frac = (fx0, fx1, fy0, fy1) => {
+      const x0 = bl.x0 + Math.floor(w * fx0), x1 = bl.x0 + Math.ceil(w * fx1), y0 = t + Math.floor(h * fy0), y1 = t + Math.ceil(h * fy1);
+      let n = 0, on = 0; for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { n++; on += ink[y * W + x]; }
+      return n ? on / n : 0;
+    };
+    const seg = [frac(.25, .75, 0, .16), frac(.72, 1, .12, .42), frac(.72, 1, .58, .88), frac(.25, .75, .84, 1), frac(0, .28, .58, .88), frac(0, .28, .12, .42), frac(.25, .75, .42, .58)];
+    const fmax = Math.max(...seg), code = seg.map(f => f > Math.max(0.15, fmax * 0.45) ? '1' : '0').join('');
+    let best = null, dist = 9;
+    for (const [k, v] of Object.entries(SEG_DIGITS)) { let dd = 0; for (let i = 0; i < 7; i++) if (k[i] !== code[i]) dd++; if (dd < dist) { dist = dd; best = v; } }
+    out += dist <= 1 ? best : '?';
+  }
+  return out;
+  }
+}
+function cropFrame(video, frameEl) {
+  const vr = video.getBoundingClientRect(), fr = frameEl.getBoundingClientRect(), vw = video.videoWidth, vh = video.videoHeight;
+  const k = Math.max(vr.width / vw, vr.height / vh), ox = vr.left + (vr.width - vw * k) / 2, oy = vr.top + (vr.height - vh * k) / 2;
+  const sx = Math.max(0, (fr.left - ox) / k), sy = Math.max(0, (fr.top - oy) / k);
+  const sw = Math.min(vw - sx, fr.width / k), sh = Math.min(vh - sy, fr.height / k);
+  const c = document.createElement('canvas'); c.width = Math.round(sw); c.height = Math.round(sh);
+  c.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  return c;
+}
+function frameBlob(video) {
+  const k = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
+  const c = document.createElement('canvas'); c.width = Math.round(video.videoWidth * k); c.height = Math.round(video.videoHeight * k);
+  c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+  return canvasBlob(c, 0.7);
+}
+// Resolves {value, blob} when taken, {manual:true} for typing, {fallback:true} if the live camera is unavailable, null on cancel
+function scanOdometer(expected, label, inputId) {
+  return new Promise(async resolve => {
+    const ov = document.createElement('div'); ov.className = 'scanner'; ov.setAttribute('role', 'dialog');
+    ov.innerHTML = `<video playsinline muted autoplay></video>
+      <div class="scan-frame"></div>
+      <div class="scan-top"><b>${esc(label)}</b><span>Nur die Zeile mit dem Gesamt-KM-Stand in den Rahmen halten</span></div>
+      <div class="scan-bottom"><div class="scan-read msg" aria-live="polite">Kamera startet…</div>
+        <div class="scan-actions"><button class="btn primary" data-a="ok" disabled>Übernehmen</button><button class="btn" data-a="manual">Eintippen</button><button class="btn" data-a="cancel">Abbrechen</button></div></div>`;
+    document.body.appendChild(ov);
+    const hintEl = ov.querySelector('.scan-top span'), video = ov.querySelector('video'), readEl = ov.querySelector('.scan-read'), okBtn = ov.querySelector('[data-a=ok]'), frame = ov.querySelector('.scan-frame');
+    let stream = null, stopped = false, best = null, last = null, streak = 0;
+    const close = () => { stopped = true; stream && stream.getTracks().forEach(t => t.stop()); ov.remove(); };
+    const take = async v => { if (stopped) return; stopped = true; frame.classList.add('ok'); let blob = null; try { blob = await frameBlob(video); } catch {} close(); resolve({ value: v, blob }); };
+    ov.querySelector('[data-a=cancel]').onclick = () => { close(); resolve(null); };
+    ov.querySelector('[data-a=manual]').onclick = () => { close(); const i = document.getElementById(inputId); if (i) { i.focus(); i.select?.(); } resolve({ manual: true }); };
+    okBtn.onclick = () => best != null && take(best);
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    } catch { close(); resolve({ fallback: true }); return; }
+    if (stopped) { stream.getTracks().forEach(t => t.stop()); return; }
+    video.srcObject = stream; await video.play().catch(() => {});
+    readEl.textContent = 'Suche KM-Stand…';
+    let w = null; getOcr().then(x => { w = x; }).catch(() => {});   // general text recognition loads in the background
+    while (!stopped) {
+      if (video.videoWidth && document.visibilityState === 'visible') {
+        try {
+          const crop = cropFrame(video, frame), s1 = prepStrip(crop), s2 = prepStrip(crop, true);
+          const r1 = readSevenSeg(s1), r2 = readSevenSeg(s2), good = x => x.replace(/\?/g, '').length;
+          const segRaw = good(r2) > good(r1) ? r2 : r1, strip = good(r2) > good(r1) ? s2 : s1, seven = segRaw.replace(/\?/g, ' ');
+          let c = odoCandidates(seven, expected)[0], fromSeg = !segRaw.includes('?');
+          const ok = v => v != null && (expected != null ? (v >= expected && v <= expected + 5000) : String(v).length >= 5);
+          if (!ok(c) && w) {
+            fromSeg = false;
+            await w.setParameters({ tessedit_pageseg_mode: '7' });
+            const r = await w.recognize(strip);
+            if (stopped) break;
+            const c2 = odoCandidates(r.data.text, expected)[0];
+            if (c2 != null && (ok(c2) || c == null)) c = c2;
+          }
+          if (c != null) {
+            const plausible = expected != null ? (c >= expected && c <= expected + 5000) : String(c).length >= 4;
+            best = c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(c)}`;
+            readEl.classList.remove('msg'); readEl.textContent = fmtInt(c) + (plausible && fromSeg ? '' : ' ?');
+            hintEl.textContent = segRaw.includes('?') ? 'Ziffern abgeschnitten? Zahl mittig in den Rahmen halten.' : 'Nur die Zeile mit dem Gesamt-KM-Stand in den Rahmen halten';
+            streak = c === last ? streak + 1 : 1; last = c;
+            if (plausible && fromSeg && streak >= 2) { readEl.textContent = `${fmtInt(c)} erkannt`; await sleep(350); take(c); break; }
+          }
+        } catch (e) { console.warn(e); }
+      }
+      await sleep(200);
+    }
+  });
+}
+async function scanInto(root, inputId, expectedFor, onPhoto) {
+  const btn = root.querySelector(`[data-cam="${inputId}"]`); if (!btn) return;
+  const res = await scanOdometer(expectedFor(inputId), inputId === 'f_odoEnd' ? 'KM-Stand Ende' : 'KM-Stand Beginn', inputId);
+  if (!res || res.manual) return;
+  if (res.fallback) { scannerBroken = true; toast('Live-Kamera nicht verfügbar. Tippe auf das Kamera-Symbol, um ein Foto zu machen.'); return; }
+  const input = root.querySelector('#' + inputId);
+  if (!input) return;
+  input.value = res.value; input.dispatchEvent(new Event('input', { bubbles: true }));
+  const chips = root.querySelector(`[data-chips="${inputId}"]`); if (chips) chips.hidden = true;
+  if (res.blob) { try { await store.putPhoto(btn.dataset.key, res.blob); btn.classList.add('has'); onPhoto && onPhoto(inputId === 'f_odoEnd' ? 'end' : 'start'); } catch {} }
+  toast(`KM-Stand ${fmtInt(res.value)} übernommen.`);
 }
 async function processOdoPhoto(file, root, inputId, expectedFor, onPhoto) {
   {
@@ -642,7 +860,7 @@ function askOdo(title) {
         <button class="link" id="oc_skip">Jetzt nicht</button>
       </div>`, sh => {
       const pick = c => { sheetOnClose = null; closeSheet(); res(c); };
-      sh.querySelector('#oc_cam').onclick = () => { const file = new Promise(r => pickPhoto(r)); pick({ mode: 'camera', file }); };
+      sh.querySelector('#oc_cam').onclick = () => pick({ mode: 'camera', req: camRequest() });
       sh.querySelector('#oc_man').onclick = () => pick({ mode: 'manual' });
       sh.querySelector('#oc_skip').onclick = () => pick({ mode: 'skip' });
     });
@@ -652,14 +870,14 @@ function askOdo(title) {
 function focusInput(id) { const i = $('#' + id); if (i) { i.scrollIntoView({ block: 'center' }); i.focus(); i.select?.(); } }
 function startTrip() {
   const mode = odoMode();
-  const file = mode === 'camera' ? new Promise(r => pickPhoto(r)) : null;
+  const req = mode === 'camera' ? camRequest() : null;
   beginTrip();
   const handle = c => {
-    if (c.mode === 'camera') c.file.then(f => { if (S.active && runCam) processOdoPhoto(f, runCam.root, 'r_odo', runCam.expected, runCam.onPhoto); });
+    if (c.mode === 'camera') { if (S.active) runCamRequest(c.req, runCam, 'r_odo'); }
     else if (c.mode === 'manual') focusInput('r_odo');
   };
   if (mode === 'ask') askOdo('Fahrt gestartet').then(handle);
-  else handle({ mode, file });
+  else handle({ mode, req });
 }
 function beginTrip() {
   const t0 = Date.now(), last = lastTrip(), id = uid();
@@ -689,7 +907,7 @@ async function resolveStartAddr() {
 function stopTrip() {
   if (!S.active) return;
   const mode = odoMode();
-  const choice = mode === 'camera' ? Promise.resolve({ mode, file: new Promise(r => pickPhoto(r)) })
+  const choice = mode === 'camera' ? Promise.resolve({ mode, req: camRequest() })
     : mode === 'ask' ? askOdo('Fahrt beendet') : Promise.resolve({ mode });
   stopTripGps(choice);
 }
@@ -726,7 +944,7 @@ async function stopTripGps(choice) {
   S.year = new Date(trip.start.t).getFullYear();
   render();
   openTripForm(trip, { isNew: true });
-  if (c.mode === 'camera') c.file.then(f => { if (formCam && document.contains(formCam.root)) processOdoPhoto(f, formCam.root, 'f_odoEnd', formCam.expected, formCam.onPhoto); });
+  if (c.mode === 'camera') runCamRequest(c.req, formCam, 'f_odoEnd');
   else if (c.mode === 'manual') focusInput('f_odoEnd');
 }
 function newManualTrip() {
@@ -774,7 +992,7 @@ function openTripForm(trip, { isNew }) {
         ${odoFieldHtml('f_odoStart', 'KM-Stand Beginn', v.odoStart, trip.id + ':start', trip.photos?.start)}
         ${odoFieldHtml('f_odoEnd', 'KM-Stand Ende', v.odoEnd, trip.id + ':end', trip.photos?.end)}
       </div>
-      <p class="hint" style="margin-top:-4px">Tippe auf die Kamera und fotografiere den Tacho. Der KM-Stand wird aus dem Foto gelesen.</p>
+      <p class="hint" style="margin-top:-4px">Tippe auf die Kamera und halte den KM-Stand in den Rahmen. Die Zahl wird automatisch gelesen.</p>
       <div class="thumbs" id="formThumbs" hidden></div>
       <label class="field" id="w_km"><span class="lbl">Gefahrene km</span><input id="f_km" inputmode="decimal" value="${v.km === '' ? '' : String(v.km).replace('.', ',')}"><span class="msg" hidden>Bitte km eintragen.</span></label>
       <div class="calc" id="calc">${calcLine()}${trip.manual ? ' <button type="button" class="btn small" id="calcRoute">Strecke aus Adressen berechnen</button>' : ''}</div>
@@ -1012,7 +1230,7 @@ function openSettings() {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-20.3';
+const APP_VERSION = '2026-10-20.5';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
