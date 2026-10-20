@@ -4,6 +4,7 @@
 1. **Fahrt starten** tippen, wenn du losfährst. Die App fragt, ob du den Tacho fotografieren oder den KM-Stand eintippen willst. Bei „Tacho fotografieren“ geht eine Live-Kamera mit Rahmen auf: nur die Zeile mit dem Gesamt-KM-Stand hineinhalten, die Zahl wird automatisch erkannt und übernommen. Digitale LCD-Anzeigen (7-Segment) und Punktmatrix-Anzeigen (5x7 Punkte) werden mit einer eigenen Erkennung gelesen. Startzeit und Standort werden gespeichert.
 2. Während der Fahrt die App offen lassen (Bildschirm bleibt an), dann wird die Strecke per GPS mitgeschrieben.
 3. **Fahrt beenden** tippen und wieder fotografieren oder eintippen. Ziel-Adresse, KM-Stand und Kilometer werden automatisch eingetragen, du prüfst die erkannte Zahl und ergänzt den Zweck.
+Favoriten: Oben im Formular stehen deine häufigsten Fahrten (Ziel, Zweck, Kunde). Ein Tipp füllt alle drei Felder aus. Die Liste lernt aus deinen bisherigen Fahrten, und in den Feldern selbst werden frühere Eingaben vorgeschlagen.
 4. Vergessen? **Fahrt nachtragen**, Adressen eingeben, "Strecke aus Adressen berechnen".
 5. Zum Jahresende: **Export & PDF** für die Excel-Tabelle oder „PDF erstellen“ fürs Finanzamt. Mit „Druckvorschau“ siehst du die Seite vorher in der App. Das PDF kannst du in Dateien sichern, drucken oder per Mail schicken.
 

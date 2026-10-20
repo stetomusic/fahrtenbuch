@@ -188,6 +188,12 @@ dl.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
 .thumbs { display: flex; gap: 10px; flex-wrap: wrap; }
 .thumb { display: grid; gap: 4px; background: none; border: 0; padding: 0; text-align: left; font-size: 12px; color: var(--muted); }
 .thumb img { width: 120px; height: 90px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
+.favs { display: grid; gap: 6px; }
+.favrow { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+.fav { flex: 0 0 auto; max-width: 70%; text-align: left; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 12px; padding: 8px 12px; display: grid; gap: 2px; }
+.fav b, .fav small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fav small { color: var(--muted); font-size: 13px; }
+.fav[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 13px; color: var(--muted); }
 .viewer { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.92); display: grid; place-items: center; padding: calc(12px + env(safe-area-inset-top, 0px)) 12px calc(12px + env(safe-area-inset-bottom, 0px)); }
 .viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
@@ -917,6 +923,22 @@ function l17Stats() {
 function saveActive() { return store.set('active', S.active || null); }
 function yearsAvailable() { const ys = new Set(S.trips.map(t => new Date(t.start.t).getFullYear())); ys.add(new Date().getFullYear()); return [...ys].sort((a, b) => b - a); }
 function cityOf(addr) { if (!addr) return ''; const parts = addr.split(',').map(s => s.trim()); return (parts[parts.length - 1] || '').replace(/^\d{4,5}\s+/, ''); }
+/* favourites: the most frequent destination + purpose + client from earlier trips of the same mode, newer trips count more */
+function favourites(exceptId, n = 6) {
+  const now = Date.now(), m = new Map();
+  for (const t of S.trips) {
+    if (t.id === exceptId || t.draft || !inMode(t)) continue;
+    const to = (t.end?.addr || '').trim(), purpose = (t.purpose || '').trim(), client = t.type === 'l17' ? '' : (t.client || '').trim();
+    if (!to && !purpose) continue;
+    const k = [to, purpose, client].join('|').toLowerCase();
+    const w = 1 + Math.max(0, 1 - (now - t.start.t) / (365 * 864e5));
+    const f = m.get(k) || { to, purpose, client, type: t.type, score: 0, last: 0 };
+    f.score += w; if (t.start.t > f.last) { f.last = t.start.t; f.to = to; f.purpose = purpose; f.client = client; f.type = t.type; }
+    m.set(k, f);
+  }
+  return [...m.values()].sort((a, b) => b.score - a.score || b.last - a.last).slice(0, n);
+}
+const distinctVals = (key, exceptId) => [...new Set(S.trips.filter(t => t.id !== exceptId && inMode(t)).sort(sortByTime).map(t => (key === 'to' ? t.end?.addr : t[key]) || '').map(x => x.trim()).filter(Boolean))].slice(0, 30);
 function routeLabel(t) {
   const a = t.start.addr, b = t.end?.addr;
   if (!a && !b) return 'Ort fehlt';
@@ -1252,13 +1274,14 @@ function openTripForm(trip, { isNew }) {
   openSheet(`
     <div class="sheet-head"><h3>${isNew ? (trip.manual ? 'Fahrt nachtragen' : 'Fahrt abschließen') : 'Fahrt bearbeiten'}</h3><button class="btn small" data-close>Schließen</button></div>
     <form id="tf" novalidate style="display:grid;gap:12px">
+      ${(() => { const fs = favourites(trip.id); return fs.length ? `<div class="favs"><span class="lbl">Favoriten</span><div class="favrow">${fs.map((x, i) => `<button type="button" class="fav" data-fav="${i}"><b>${esc((x.to || '').split(',')[0] || x.purpose)}</b>${x.purpose && x.to ? `<small>${esc(x.purpose)}${x.client ? ' · ' + esc(x.client) : ''}</small>` : x.client ? `<small>${esc(x.client)}</small>` : ''}</button>`).join('')}</div></div>` : ''; })()}
       <div class="row3">
         <label class="field"><span class="lbl">Datum</span><input id="f_date" type="date" value="${v.date}" required></label>
         <label class="field"><span class="lbl">Beginn</span><input id="f_tStart" type="time" value="${v.tStart}"></label>
         <label class="field"><span class="lbl">Ende</span><input id="f_tEnd" type="time" value="${v.tEnd}"></label>
       </div>
       <label class="field"><span class="lbl">Abfahrtsort</span><input id="f_from" value="${esc(v.from)}" placeholder="Straße, PLZ Ort" autocomplete="street-address"></label>
-      <label class="field"><span class="lbl">Zielort</span><input id="f_to" value="${esc(v.to)}" placeholder="Straße, PLZ Ort"></label>
+      <label class="field"><span class="lbl">Zielort</span><input id="f_to" list="toList" value="${esc(v.to)}" placeholder="Straße, PLZ Ort"><datalist id="toList">${distinctVals('to', trip.id).map(x => `<option value="${esc(x)}">`).join('')}</datalist></label>
       ${vehicles().length > 1 ? `<label class="field"><span class="lbl">Fahrzeug</span><select id="f_vehicle">${vehicles().map(x => `<option value="${x.id}" ${x.id === (trip.vehicleId || curVehicle()?.id) ? 'selected' : ''}>${esc(vehLabel(x))}</option>`).join('')}</select></label>` : ''}
       ${segHtml(type)}
       <fieldset class="box" id="l17box" ${type === 'l17' ? '' : 'hidden'}><legend>L17-Fahrtenprotokoll</legend>
@@ -1268,8 +1291,8 @@ function openTripForm(trip, { isNew }) {
           <label class="field"><span class="lbl">Tageszeit</span><select id="f_light">${[...new Set([trip.light || tripLight(trip), 'Tag', 'Dämmerung', 'Dunkelheit'])].map(x => `<option ${x === (trip.light || tripLight(trip)) ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
         </div>
       </fieldset>
-      <label class="field" id="w_purpose"><span class="lbl">Zweck der Fahrt</span><input id="f_purpose" value="${esc(v.purpose)}" placeholder="z.B. Kundentermin, Baustelle, Schulung"><span class="msg" hidden>Für dienstliche Fahrten braucht das Finanzamt einen Zweck.</span></label>
-      <label class="field" id="w_client"><span class="lbl">Kunde / besuchte Stelle</span><input id="f_client" value="${esc(v.client)}" placeholder="optional"></label>
+      <label class="field" id="w_purpose"><span class="lbl">Zweck der Fahrt</span><input id="f_purpose" list="purposeList" value="${esc(v.purpose)}" placeholder="z.B. Kundentermin, Baustelle, Schulung"><span class="msg" hidden>Für dienstliche Fahrten braucht das Finanzamt einen Zweck.</span><datalist id="purposeList">${distinctVals('purpose', trip.id).map(x => `<option value="${esc(x)}">`).join('')}</datalist></label>
+      <label class="field" id="w_client"><span class="lbl">Kunde / besuchte Stelle</span><input id="f_client" list="clientList" value="${esc(v.client)}" placeholder="optional"><datalist id="clientList">${distinctVals('client', trip.id).map(x => `<option value="${esc(x)}">`).join('')}</datalist></label>
       <div class="row2">
         ${odoFieldHtml('f_odoStart', 'KM-Stand Beginn', v.odoStart, trip.id + ':start', trip.photos?.start)}
         ${odoFieldHtml('f_odoEnd', 'KM-Stand Ende', v.odoEnd, trip.id + ':end', trip.photos?.end)}
@@ -1294,6 +1317,16 @@ function openTripForm(trip, { isNew }) {
     };
     sheet.querySelectorAll('.seg button').forEach(b => b.onclick = () => { type = b.dataset.type; sheet.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', x === b)); typeUi(); });
     typeUi();
+    const favList = favourites(trip.id);
+    sheet.querySelectorAll('[data-fav]').forEach(b => b.onclick = () => {
+      const x = favList[+b.dataset.fav];
+      if (x.to) f('to').value = x.to;
+      if (x.purpose) f('purpose').value = x.purpose;
+      f('client').value = x.client || '';
+      if (x.type !== 'l17' && type !== 'l17' && x.type !== type) { type = x.type; sheet.querySelectorAll('.seg button').forEach(y => y.setAttribute('aria-pressed', y.dataset.type === type)); typeUi(); }
+      sheet.querySelectorAll('[data-fav]').forEach(y => y.setAttribute('aria-pressed', y === b));
+      f('to').dispatchEvent(new Event('input'));
+    });
     const syncFromKm = () => { const s = num(f('odoStart').value), k = num(f('km').value); if (s != null && k != null) f('odoEnd').value = Math.round(s + k); };
     f('km').oninput = syncFromKm;
     f('odoStart').oninput = () => { const s = num(f('odoStart').value), e = num(f('odoEnd').value); if (s != null && e != null && e >= s && trip.photos?.end) f('km').value = String(e - s).replace('.', ','); else syncFromKm(); };
@@ -1734,7 +1767,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-20.14';
+const APP_VERSION = '2026-10-20.15';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
