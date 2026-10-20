@@ -5,7 +5,7 @@
 2. Während der Fahrt die App offen lassen (Bildschirm bleibt an), dann wird die Strecke per GPS mitgeschrieben.
 3. **Fahrt beenden** tippen und wieder fotografieren oder eintippen. Ziel-Adresse, KM-Stand und Kilometer werden automatisch eingetragen, du prüfst die erkannte Zahl und ergänzt den Zweck.
 4. Vergessen? **Fahrt nachtragen**, Adressen eingeben, "Strecke aus Adressen berechnen".
-5. Zum Jahresende: **Export & PDF** für die Excel-Tabelle oder das PDF fürs Finanzamt.
+5. Zum Jahresende: **Export & PDF** für die Excel-Tabelle oder „PDF erstellen“ fürs Finanzamt. Das PDF kannst du in Dateien sichern, drucken oder per Mail schicken.
 
 ## Mehrere Autos
 Oben unter dem Titel steht das aktuelle Auto. Antippen, um zu wechseln. In den **Einstellungen** unter „Fahrzeuge“ legst du weitere Autos mit Kennzeichen an. Jedes Auto hat seinen eigenen letzten KM-Stand, und der Export lässt sich nach Auto filtern.
