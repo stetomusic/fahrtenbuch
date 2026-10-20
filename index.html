@@ -237,13 +237,11 @@ fieldset.box legend { font: 600 13px var(--font-body); text-transform: uppercase
 .pv { position: fixed; inset: 0; z-index: 60; background: #6b6f6d; overflow: auto; -webkit-overflow-scrolling: touch; }
 .pv-bar { position: sticky; top: 0; left: 0; z-index: 1; display: flex; gap: 8px; align-items: center; padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px; background: var(--surface); border-bottom: 1px solid var(--line, #ddd); }
 .pv-bar h3 { margin: 0 auto 0 0; font-size: 17px; }
-.pv-pages { padding: 12px 8px calc(24px + env(safe-area-inset-bottom, 0px)); }
-.pv-page { width: 1123px; min-height: 794px; box-sizing: border-box; padding: 45px; margin: 0 auto 12px; background: #fff; color: #000; box-shadow: 0 2px 10px rgba(0,0,0,.35); font: 10pt/1.3 var(--font-body); }
-.pv-page table { width: 100%; border-collapse: collapse; }
-.pv-page th, .pv-page td { border: 1px solid #999; padding: 3px 4px; vertical-align: top; text-align: left; }
-.pv-page td.n, .pv-page th.n { text-align: right; font-variant-numeric: tabular-nums; }
-.pv-page h1 { font-size: 16pt; margin: 0 0 4px; }
-.pv-page p { margin: 6px 0; }
+.pv-pages { padding: 12px 8px calc(24px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 12px; justify-items: center; }
+.pv-pages.big { justify-items: start; }
+.pv-page { display: block; width: 100%; height: auto; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.35); }
+.pv-pages.big .pv-page { width: 260%; max-width: none; }
+.pv-wait { color: #fff; text-align: center; margin: 40px 16px; }
 @media print { .pv { display: none !important; } }
 
 #print { display: none; }
@@ -1429,6 +1427,7 @@ async function deliverFile(name, blob, onDone = () => {}) {
     try { await navigator.share({ files: [file], title: name }); onDone(); return; } catch (e) {
       if (e.name === 'AbortError') return;
       if (e.name === 'NotAllowedError') {
+        document.querySelector('.pv')?.remove();
         openSheet(`<div class="sheet-head"><h3>Fertig</h3><button class="btn small" data-close>Schließen</button></div><p class="hint">${esc(name)} ist erstellt.</p><button class="btn primary" id="shareNow">Teilen oder sichern</button>`, sh => {
           sh.querySelector('#shareNow').onclick = () => navigator.share({ files: [file], title: name }).then(() => { closeSheet(); onDone(); }).catch(() => {});
         });
@@ -1553,21 +1552,43 @@ function openYearOverview() {
     });
   });
 }
-/* print preview: the same page as the PDF, shown as a sheet of paper scaled to the screen */
-function openPreview(onPdf) {
+/* print preview: the finished PDF itself, drawn page by page with pdf.js, so the preview is exactly what gets printed */
+const PDFJS = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/';
+async function loadPdfJs() {
+  if (!window.pdfjsLib) await loadScript(PDFJS + 'pdf.min.js');
+  // a worker from another origin needs a same-origin wrapper
+  if (!window.pdfjsLib.GlobalWorkerOptions.workerSrc) window.pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([`importScripts('${PDFJS}pdf.worker.min.js');`], { type: 'text/javascript' }));
+  return window.pdfjsLib;
+}
+async function openPreview(l17, name) {
   document.querySelector('.pv')?.remove();
   const pv = document.createElement('div'); pv.className = 'pv'; pv.setAttribute('role', 'dialog'); pv.setAttribute('aria-label', 'Druckvorschau');
-  pv.innerHTML = `<div class="pv-bar"><h3>Vorschau</h3><button class="btn small" id="pvZoom">Vergrößern</button><button class="btn small primary" id="pvPdf">PDF</button><button class="btn small" id="pvClose">Schließen</button></div>
-    <div class="pv-pages"><div class="pv-page">${$('#print').innerHTML}</div></div>`;
+  pv.innerHTML = `<div class="pv-bar"><h3>Vorschau</h3><button class="btn small" id="pvZoom">Vergrößern</button><button class="btn small primary" id="pvPdf" disabled>PDF</button><button class="btn small" id="pvClose">Schließen</button></div>
+    <div class="pv-pages"><p class="pv-wait">Vorschau wird erstellt…</p></div>`;
   document.body.appendChild(pv);
-  const page = pv.querySelector('.pv-page');
-  let big = false;
-  const fit = () => { page.style.zoom = big ? 1 : Math.min(1, (pv.clientWidth - 16) / 1123); pv.querySelector('#pvZoom').textContent = big ? 'Ganze Seite' : 'Vergrößern'; };
-  fit(); addEventListener('resize', fit);
-  const close = () => { removeEventListener('resize', fit); pv.remove(); };
-  pv.querySelector('#pvZoom').onclick = () => { big = !big; fit(); };
-  pv.querySelector('#pvClose').onclick = close;
-  pv.querySelector('#pvPdf').onclick = onPdf;
+  const pages = pv.querySelector('.pv-pages');
+  let big = false, blob = null;
+  pv.querySelector('#pvClose').onclick = () => pv.remove();
+  pv.querySelector('#pvZoom').onclick = () => { big = !big; pages.classList.toggle('big', big); pv.querySelector('#pvZoom').textContent = big ? 'Ganze Seite' : 'Vergrößern'; };
+  // the PDF is ready before the tap, so the share sheet opens straight from the tap
+  pv.querySelector('#pvPdf').onclick = () => { if (blob) deliverFile(name, blob); };
+  try {
+    blob = await makePdf(l17);
+    pv.querySelector('#pvPdf').disabled = false;
+    const lib = await loadPdfJs();
+    const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()) }).promise;
+    pages.innerHTML = '';
+    const px = Math.min(2600, Math.max(1400, (pv.clientWidth || 390) * (devicePixelRatio || 2) * 2));
+    for (let n = 1; n <= doc.numPages; n++) {
+      if (!pv.isConnected) return;
+      const pg = await doc.getPage(n), vp0 = pg.getViewport({ scale: 1 }), vp = pg.getViewport({ scale: px / vp0.width });
+      const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height; c.className = 'pv-page'; c.setAttribute('aria-label', `Seite ${n}`);
+      await pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+      pages.appendChild(c);
+    }
+  } catch (e) {
+    pages.innerHTML = `<p class="pv-wait">${blob ? 'Die Vorschau konnte nicht angezeigt werden. Das PDF kannst du trotzdem mit „PDF“ teilen.' : 'PDF konnte nicht erstellt werden. Bitte Internetverbindung prüfen.'}</p>`;
+  }
 }
 function openExport() {
   const hasL17 = appMode() === 'l17';
@@ -1599,14 +1620,15 @@ function openExport() {
       : deliverFile(`Fahrtenbuch_${sel.value || 'alle'}.csv`, new Blob([csvFor(+sel.value, veh.value)], { type: 'text/csv;charset=utf-8' }));
     loadPdfLib().catch(() => {});
     const build = () => { const l17 = k() === 'l17', y = +sel.value; if (l17) buildPrintL17(y, veh.value); else buildPrint(y, veh.value); return { l17, y }; };
+    const pdfName = (l17, y) => l17 ? `L17_Fahrtenprotokoll${y ? '_' + y : ''}.pdf` : `Fahrtenbuch_${y || 'alle'}.pdf`;
     const sharePdf = async () => {
       const { l17, y } = build();
       let blob;
       try { blob = await makePdf(l17); } catch { toast('PDF konnte nicht erstellt werden. Bitte Internetverbindung prüfen.'); return; }
-      deliverFile(l17 ? `L17_Fahrtenprotokoll${y ? '_' + y : ''}.pdf` : `Fahrtenbuch_${y || 'alle'}.pdf`, blob);
+      deliverFile(pdfName(l17, y), blob);
     };
     sheet.querySelector('#x_pdf').onclick = sharePdf;
-    sheet.querySelector('#x_prev').onclick = () => { build(); openPreview(sharePdf); };
+    sheet.querySelector('#x_prev').onclick = () => { const { l17, y } = build(); openPreview(l17, pdfName(l17, y)); };
   });
 }
 function openBackup() {
@@ -1712,7 +1734,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-20.12';
+const APP_VERSION = '2026-10-20.13';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
