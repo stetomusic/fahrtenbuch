@@ -499,6 +499,107 @@ function readSevenSeg(strip) {
   return out;
   }
 }
+// Decoder for dot-matrix displays (5x7 dots per character, common on newer dashboards).
+const DOT_FONT = {
+  '0': ['01110100011001110101110011000101110', '01110100011000110001100011000101110'],
+  '1': ['00100011000010000100001000010001110'],
+  '2': ['01110100010000100010001000100011111'],
+  '3': ['11111000100010000010000011000101110', '01110100010000100110000011000101110'],
+  '4': ['00010001100101010010111110001000010'],
+  '5': ['11111100001111000001000011000101110'],
+  '6': ['00110010001000011110100011000101110'],
+  '7': ['11111000010001000100010000100001000'],
+  '8': ['01110100011000101110100011000101110'],
+  '9': ['01110100011000101111000010001001100'],
+};
+function readDotMatrix(strip) {
+  const W = strip.width, H = strip.height, d = strip.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data, pad = 20;
+  let ink = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) ink[i] = d[i * 4] < 128 ? 1 : 0;
+  // drop big shapes at the frame edge (display border)
+  const seen = new Uint8Array(W * H), IW = W - 2 * pad, IH = H - 2 * pad;
+  for (let i0 = 0; i0 < W * H; i0++) {
+    if (!ink[i0] || seen[i0]) continue;
+    const comp = [i0], q = [i0]; seen[i0] = 1; let x0 = W, x1 = 0, y0 = H, y1 = 0;
+    while (q.length) { const i = q.pop(), x = i % W, y = (i / W) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) if (j >= 0 && ink[j] && !seen[j]) { seen[j] = 1; q.push(j); comp.push(j); } }
+    if (x1 - x0 > IW * 0.3 || y1 - y0 > IH * 0.6 || comp.length > IW * IH * 0.03) comp.forEach(i => { ink[i] = 0; });
+  }
+  const dilate = (src, r) => {
+    const a = new Uint8Array(W * H), b = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (src[y * W + x]) for (let k = Math.max(0, x - r); k <= Math.min(W - 1, x + r); k++) a[y * W + k] = 1;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (a[y * W + x]) for (let k = Math.max(0, y - r); k <= Math.min(H - 1, y + r); k++) b[k * W + x] = 1;
+    return b;
+  };
+  const mainBand = D => {
+    const rows = new Array(H).fill(0);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) rows[y] += D[y * W + x];
+    const rowMin = Math.max(1, Math.max(...rows) * 0.12), bands = []; let cur = null, gap = 0;
+    for (let y = 0; y < H; y++) {
+      if (rows[y] > rowMin) { if (!cur) cur = { y0: y, y1: y, sum: 0 }; cur.y1 = y; cur.sum += rows[y]; gap = 0; }
+      else if (cur && ++gap > 1) { bands.push(cur); cur = null; gap = 0; }
+    }
+    if (cur) bands.push(cur);
+    return bands.sort((a, b) => b.sum - a.sum)[0];
+  };
+  const D = dilate(ink, 1), band = mainBand(D);
+  if (!band) return '';
+  const bh = band.y1 - band.y0 - 1, pitch = bh / 7;
+  if (pitch < 2) return '';
+  const colMin = Math.max(2, bh * 0.15);   // ignore stray specks
+  const cols = new Array(W).fill(0);
+  for (let x = 0; x < W; x++) for (let y = band.y0; y <= band.y1; y++) cols[x] += D[y * W + x];
+  const blobs = []; let b = null;
+  for (let x = 0; x < W; x++) { if (cols[x] > colMin) { if (!b) b = { x0: x, x1: x }; b.x1 = x; } else if (b) { blobs.push(b); b = null; } }
+  if (b) blobs.push(b);
+  const cellBits = (cx0, cw, t, h, sh) => {
+    let bits = ''; const yc = t + h / 2;
+    for (let ry = 0; ry < 7; ry++) for (let c = 0; c < 5; c++) {
+      const my = t + (ry + 0.5) * h / 7, mx = cx0 + (c + 0.5) * cw / 5 + sh * (yc - my), hx = Math.max(1, cw / 5 * 0.3), hy = Math.max(1, h / 7 * 0.3);
+      let n = 0, on = 0;
+      for (let y = Math.round(my - hy); y <= Math.round(my + hy); y++) for (let x = Math.round(mx - hx); x <= Math.round(mx + hx); x++) { n++; on += (x >= 0 && x < W && y >= 0 && y < H) ? ink[y * W + x] : 0; }
+      bits += on / n > 0.3 ? '1' : '0';
+    }
+    return bits;
+  };
+  const match = bits => {
+    let best = null, bd = 99, second = 99;
+    for (const [dg, pats] of Object.entries(DOT_FONT)) for (const pt of pats) {
+      let dd = 0; for (let i = 0; i < 35; i++) if (pt[i] !== bits[i]) dd++;
+      if (dd < bd) { if (best !== dg) second = bd; bd = dd; best = dg; } else if (dd < second && dg !== best) second = dd;
+    }
+    return { best, bd, second };
+  };
+  let out = '', prevEnd = -1;
+  for (const bl of blobs) {
+    const w = bl.x1 - bl.x0 - 1;                       // undo the 1px dilation
+    if (w < pitch * 1.5) { out += ' '; continue; }      // specks, dots
+    // fixed-pitch font: 5 dot columns + 1 gap per character; try character counts and keep the best fit
+    const nEst = Math.max(1, Math.round((w + pitch) / (6 * pitch)));
+    let bestRun = null;
+    for (let n = Math.max(1, nEst - 1); n <= nEst + 2; n++) {
+      const p = (w + 1) / (6 * n - 1);
+      if (p < pitch * 0.55 || p > pitch * 1.4) continue;
+      const cw = 5 * p, cells = [];
+      for (let k = 0; k < n; k++) {
+        const cx0 = bl.x0 + 1 + k * 6 * p;
+        let t = H, btm = -1;
+        for (let y = band.y0; y <= band.y1; y++) for (let x = Math.floor(cx0); x <= Math.ceil(cx0 + cw); x++) if (ink[y * W + x]) { if (y < t) t = y; if (y > btm) btm = y; }
+        const h = btm - t + 1;
+        if (h < bh * 0.6) { cells.push({ ch: ' ', bd: 12 }); continue; }
+        let res = { bd: 99 };
+        for (let sh = -0.1; sh <= 0.36; sh += 0.05) for (const dx of [-p / 3, 0, p / 3]) { const m = match(cellBits(cx0 + dx, cw, t, h, sh)); if (m.bd < res.bd) res = m; }
+        cells.push({ ch: res.bd <= 6 && res.second - res.bd >= 2 ? res.best : ' ', bd: Math.min(res.bd, 12) });
+      }
+      const score = cells.reduce((a, c) => a + c.bd, 0) / n;
+      if (!bestRun || score < bestRun.score) bestRun = { score, text: cells.map(c => c.ch).join('') };
+    }
+    if (prevEnd >= 0 && bl.x0 - prevEnd > pitch * 2.5) out += ' ';   // word gap
+    prevEnd = bl.x1;
+    out += bestRun ? bestRun.text : (w < pitch * 3.6 ? '1' : ' ');
+  }
+  return out.trim();
+}
 function cropFrame(video, frameEl) {
   const vr = video.getBoundingClientRect(), fr = frameEl.getBoundingClientRect(), vw = video.videoWidth, vh = video.videoHeight;
   const k = Math.max(vr.width / vw, vr.height / vh), ox = vr.left + (vr.width - vw * k) / 2, oy = vr.top + (vr.height - vh * k) / 2;
@@ -542,10 +643,14 @@ function scanOdometer(expected, label, inputId) {
       if (video.videoWidth && document.visibilityState === 'visible') {
         try {
           const crop = cropFrame(video, frame), s1 = prepStrip(crop), s2 = prepStrip(crop, true);
-          const r1 = readSevenSeg(s1), r2 = readSevenSeg(s2), good = x => x.replace(/\?/g, '').length;
-          const segRaw = good(r2) > good(r1) ? r2 : r1, strip = good(r2) > good(r1) ? s2 : s1, seven = segRaw.replace(/\?/g, ' ');
-          let c = odoCandidates(seven, expected)[0], fromSeg = !segRaw.includes('?');
           const ok = v => v != null && (expected != null ? (v >= expected && v <= expected + 5000) : String(v).length >= 5);
+          // own decoders first: 7-segment LCD, then dot-matrix, each in both brightness polarities
+          const reads = [[readSevenSeg(s1), s1, true], [readSevenSeg(s2), s2, true], [readDotMatrix(s1), s1, false], [readDotMatrix(s2), s2, false]];
+          let pick = null;
+          for (const [txt, st, seg] of reads) { if (seg && txt.includes('?')) continue; const v = odoCandidates(txt, expected)[0]; if (ok(v)) { pick = { v, st }; break; } }
+          const cut = !pick && reads.some(r => r[2] && /\d\?|\?\d/.test(r[0]));
+          const strip = pick ? pick.st : s1;
+          let c = pick ? pick.v : null, fromSeg = !!pick;
           if (!ok(c) && w) {
             fromSeg = false;
             await w.setParameters({ tessedit_pageseg_mode: '7' });
@@ -558,7 +663,7 @@ function scanOdometer(expected, label, inputId) {
             const plausible = expected != null ? (c >= expected && c <= expected + 5000) : String(c).length >= 4;
             best = c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(c)}`;
             readEl.classList.remove('msg'); readEl.textContent = fmtInt(c) + (plausible && fromSeg ? '' : ' ?');
-            hintEl.textContent = segRaw.includes('?') ? 'Ziffern abgeschnitten? Zahl mittig in den Rahmen halten.' : 'Nur die Zeile mit dem Gesamt-KM-Stand in den Rahmen halten';
+            hintEl.textContent = cut ? 'Ziffern abgeschnitten? Zahl mittig in den Rahmen halten.' : 'Nur die Zeile mit dem Gesamt-KM-Stand in den Rahmen halten';
             streak = c === last ? streak + 1 : 1; last = c;
             if (plausible && fromSeg && streak >= 2) { readEl.textContent = `${fmtInt(c)} erkannt`; await sleep(350); take(c); break; }
           }
@@ -1230,7 +1335,7 @@ function openSettings() {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-20.5';
+const APP_VERSION = '2026-10-20.6';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;

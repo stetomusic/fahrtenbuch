@@ -1,7 +1,7 @@
 # Fahrtenbuch-App (iPhone)
 
 ## So benutzt du sie
-1. **Fahrt starten** tippen, wenn du losfährst. Die App fragt, ob du den Tacho fotografieren oder den KM-Stand eintippen willst. Bei „Tacho fotografieren“ geht eine Live-Kamera mit Rahmen auf: nur die Zeile mit dem Gesamt-KM-Stand hineinhalten, die Zahl wird automatisch erkannt und übernommen. Digitale LCD-Anzeigen (7-Segment) werden mit einer eigenen Erkennung gelesen. Startzeit und Standort werden gespeichert.
+1. **Fahrt starten** tippen, wenn du losfährst. Die App fragt, ob du den Tacho fotografieren oder den KM-Stand eintippen willst. Bei „Tacho fotografieren“ geht eine Live-Kamera mit Rahmen auf: nur die Zeile mit dem Gesamt-KM-Stand hineinhalten, die Zahl wird automatisch erkannt und übernommen. Digitale LCD-Anzeigen (7-Segment) und Punktmatrix-Anzeigen (5x7 Punkte) werden mit einer eigenen Erkennung gelesen. Startzeit und Standort werden gespeichert.
 2. Während der Fahrt die App offen lassen (Bildschirm bleibt an), dann wird die Strecke per GPS mitgeschrieben.
 3. **Fahrt beenden** tippen und wieder fotografieren oder eintippen. Ziel-Adresse, KM-Stand und Kilometer werden automatisch eingetragen, du prüfst die erkannte Zahl und ergänzt den Zweck.
 4. Vergessen? **Fahrt nachtragen**, Adressen eingeben, "Strecke aus Adressen berechnen".
