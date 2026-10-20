@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Maps, address lookup and routing need a connection.
-const CACHE = 'fahrtenbuch-v5';
+const CACHE = 'fahrtenbuch-v6';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-192.png',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'];
 self.addEventListener('install', e => {

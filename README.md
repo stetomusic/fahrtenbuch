@@ -7,6 +7,12 @@
 4. Vergessen? **Fahrt nachtragen**, Adressen eingeben, "Strecke aus Adressen berechnen".
 5. Zum Jahresende: **Export & PDF** für die Excel-Tabelle oder das PDF fürs Finanzamt.
 
+## Mehrere Autos
+Oben unter dem Titel steht das aktuelle Auto. Antippen, um zu wechseln. In den **Einstellungen** unter „Fahrzeuge“ legst du weitere Autos mit Kennzeichen an. Jedes Auto hat seinen eigenen letzten KM-Stand, und der Export lässt sich nach Auto filtern.
+
+## L17-Führerschein
+In den **Einstellungen** „L17-Übungsfahrten dokumentieren“ einschalten, Name der Bewerberin oder des Bewerbers und die Begleitpersonen eintragen. Dann gibt es bei jeder Fahrt die Fahrtart **L17**: Begleitperson, Straßenzustand/Witterung und Tageszeit (Tag, Dämmerung, Dunkelheit, automatisch aus Uhrzeit und Ort) werden mitgeschrieben. Die Karte oben zeigt den Fortschritt: 1.000 km vor der 1. begleitenden Schulung, 1.000 km bis zur 2., insgesamt 3.000 km. Die Schulungstermine trägst du in den Einstellungen ein. Unter **Export & PDF** → „L17-Fahrtenprotokoll“ entsteht das Protokoll zum Ausdrucken mit Spalten für die Unterschriften. L17-Fahrten zählen nicht zum Kilometergeld.
+
 ## Wichtig
 - Die Daten liegen nur auf deinem iPhone. Unter **Sicherung** regelmäßig eine Sicherung in iCloud Drive speichern.
 - Wird die App während der Fahrt geschlossen, berechnet sie die km am Ende über die Route (Start → Ziel). Umwege fehlen dann.

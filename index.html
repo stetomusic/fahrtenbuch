@@ -131,6 +131,8 @@ header.top .sub { color: var(--muted); font-size: 14px; }
 .trip .r { min-width: 0; }
 .trip .r b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .trip .r span { display: block; color: var(--muted); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trip .r span.pill { display: inline-block; color: var(--muted); font-size: 11px; }
+.trip .r span.pill.draft { color: #fff; }
 .trip .k { text-align: right; font: 600 18px var(--font-display); font-variant-numeric: tabular-nums; }
 .pill { display: inline-block; font: 600 11px var(--font-body); text-transform: uppercase; letter-spacing: .06em; padding: 2px 7px; border-radius: 99px; background: var(--soft); color: var(--muted); }
 .pill.draft { background: var(--run); color: #fff; }
@@ -194,6 +196,25 @@ dl.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
 .scan-actions .btn { background: rgba(255,255,255,.14); color: #fff; border-color: rgba(255,255,255,.3); }
 .scan-actions .btn.primary { grid-column: 1 / -1; min-height: 58px; font-size: 19px; background: #3cbf8e; color: #06231a; border-color: #3cbf8e; }
 .scan-actions .btn:disabled { opacity: .45; }
+.vehbtn { background: none; border: 0; padding: 4px 0; color: var(--accent); font-weight: 600; font-size: 15px; display: inline-flex; align-items: center; gap: 4px; text-align: left; }
+.l17card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; display: grid; gap: 8px; text-align: left; width: 100%; }
+.l17card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.l17card .top b { font: 700 18px var(--font-display); text-transform: uppercase; letter-spacing: .04em; }
+.l17card .top span { font: 600 18px var(--font-display); font-variant-numeric: tabular-nums; }
+.bar { height: 10px; border-radius: 99px; background: var(--soft); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
+.steps { display: grid; gap: 2px; font-size: 14px; color: var(--muted); }
+.steps .ok { color: var(--accent); font-weight: 600; }
+.next { font-size: 14px; font-weight: 600; }
+.vrow { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.vlist { display: grid; gap: 8px; }
+.pick { display: grid; gap: 8px; }
+.pick .btn { text-align: left; min-height: 56px; }
+.pick .btn[aria-pressed="true"] { border-color: var(--accent); background: var(--soft); }
+fieldset.box { border: 1px solid var(--line); border-radius: 14px; padding: 12px; display: grid; gap: 12px; margin: 0; min-width: 0; }
+fieldset.box legend { font: 600 13px var(--font-body); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 0 6px; }
+.check { display: flex; gap: 10px; align-items: center; }
+.check input { width: 22px; height: 22px; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(20px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--surface); padding: 12px 16px; border-radius: 12px; z-index: 80; max-width: calc(100% - 32px); font-size: 15px; }
 .busy { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.45); display: grid; place-items: center; }
 .busy div { background: var(--surface); padding: 18px 22px; border-radius: 14px; font-weight: 600; }
@@ -225,6 +246,7 @@ dl.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
   </header>
 
   <section class="summary" id="summary"></section>
+  <section id="l17card" hidden></section>
   <section class="control" id="control"></section>
   <section id="log"></section>
   <section class="tools">
@@ -828,7 +850,37 @@ document.addEventListener('visibilitychange', () => {
 
 /* ---------- data ---------- */
 const sortByTime = (a, b) => b.start.t - a.start.t;
-function lastTrip() { return [...S.trips].sort(sortByTime).find(t => t.odoEnd != null) || null; }
+function lastTrip(vid = curVehicle()?.id) { return [...S.trips].sort(sortByTime).find(t => t.odoEnd != null && (!vid || !t.vehicleId || t.vehicleId === vid)) || null; }
+const TYPES = { dienstlich: 'Dienstlich', privat: 'Privat', l17: 'L17-Übungsfahrt' };
+const typeLabel = k => TYPES[k] || 'Dienstlich';
+const vehicles = () => S.settings.vehicles || [];
+const curVehicle = () => vehicles().find(v => v.id === S.settings.vehicleId) || vehicles()[0] || null;
+const vehById = id => vehicles().find(v => v.id === id) || null;
+const vehLabel = v => v ? [v.name, v.plate].filter(Boolean).join(' · ') : '';
+const l17On = () => !!(S.settings.l17 && S.settings.l17.on);
+const companions = () => String(S.settings.l17?.companions || '').split(',').map(x => x.trim()).filter(Boolean);
+function segHtml(cur) {
+  const ts = l17On() || cur === 'l17' ? ['dienstlich', 'privat', 'l17'] : ['dienstlich', 'privat'];
+  return `<div class="seg" style="grid-template-columns:repeat(${ts.length},1fr)" role="group" aria-label="Fahrtart">${ts.map(k => `<button type="button" data-type="${k}" aria-pressed="${cur === k}">${k === 'l17' ? 'L17' : TYPES[k]}</button>`).join('')}</div>`;
+}
+// Sun height (degrees) for day / twilight / dark, for the L17 protocol
+function sunAlt(t, lat, lng) {
+  const rad = Math.PI / 180, days = t / 864e5 + 2440587.5 - 2451545;
+  const g = (357.529 + 0.98560028 * days) * rad, q = 280.459 + 0.98564736 * days;
+  const L = (q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * rad, e = (23.439 - 0.00000036 * days) * rad;
+  const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L)), dec = Math.asin(Math.sin(e) * Math.sin(L));
+  const gmst = ((18.697374558 + 24.06570982441908 * days) % 24) * 15, ha = (gmst + lng) * rad - ra;
+  return Math.asin(Math.sin(lat * rad) * Math.sin(dec) + Math.cos(lat * rad) * Math.cos(dec) * Math.cos(ha)) / rad;
+}
+const lightAt = (t, lat, lng) => { const a = sunAlt(t, lat ?? 48.2, lng ?? 16.37); return a > 0 ? 'Tag' : a > -6 ? 'Dämmerung' : 'Dunkelheit'; };
+function tripLight(t) { const a = lightAt(t.start.t, t.start.lat, t.start.lng), b = t.end?.t ? lightAt(t.end.t, t.end.lat ?? t.start.lat, t.end.lng ?? t.start.lng) : a; return a === b ? a : `${a} / ${b}`; }
+function l17Stats() {
+  const c = S.settings.l17 || {}, ts = S.trips.filter(t => !t.draft && t.type === 'l17').sort((a, b) => a.start.t - b.start.t);
+  const d1 = c.s1 ? fromInputs(c.s1, '23:59') : null, d2 = c.s2 ? fromInputs(c.s2, '23:59') : null;
+  let p1 = 0, p2 = 0, p3 = 0;
+  ts.forEach(t => { const k = t.km || 0; if (d1 == null || t.start.t <= d1) p1 += k; else if (d2 == null || t.start.t <= d2) p2 += k; else p3 += k; });
+  return { trips: ts, p1, p2, p3, total: p1 + p2 + p3, d1, d2 };
+}
 function saveActive() { return store.set('active', S.active || null); }
 function yearsAvailable() { const ys = new Set(S.trips.map(t => new Date(t.start.t).getFullYear())); ys.add(new Date().getFullYear()); return [...ys].sort((a, b) => b - a); }
 function cityOf(addr) { if (!addr) return ''; const parts = addr.split(',').map(s => s.trim()); return (parts[parts.length - 1] || '').replace(/^\d{4,5}\s+/, ''); }
@@ -841,7 +893,43 @@ function routeLabel(t) {
 }
 
 /* ---------- rendering ---------- */
-function render() { renderSummary(); renderControl(); renderLog(); $('#vehicle').textContent = [S.settings.vehicle, S.settings.name].filter(Boolean).join(' · ') || 'Arbeitsfahrten für die Arbeitnehmerveranlagung'; }
+function render() {
+  renderSummary(); renderL17(); renderControl(); renderLog();
+  const v = curVehicle();
+  $('#vehicle').innerHTML = `<button class="vehbtn" id="vehBtn" aria-label="Fahrzeug wechseln">${esc(vehLabel(v) || 'Fahrzeug wählen')} <span aria-hidden="true">▾</span></button>`;
+  $('#vehBtn').onclick = openVehicleSwitch;
+}
+function renderL17() {
+  const el = $('#l17card');
+  const st = l17Stats();
+  if (!l17On() && !st.trips.length) { el.hidden = true; return; }
+  el.hidden = false;
+  const c = S.settings.l17 || {}, k = n => fmtInt(Math.floor(n));
+  let next;
+  if (!st.d1) next = st.p1 >= 1000 ? '1.000 km erreicht: jetzt die 1. begleitende Schulung in der Fahrschule machen und das Datum eintragen.' : `Noch ${k(1000 - st.p1)} km bis zur 1. begleitenden Schulung.`;
+  else if (!st.d2) next = st.p2 >= 1000 ? '1.000 km seit der 1. Schulung: jetzt die 2. begleitende Schulung machen und das Datum eintragen.' : `Noch ${k(1000 - st.p2)} km bis zur 2. begleitenden Schulung.`;
+  else next = st.total >= 3000 ? '3.000 km erreicht. Weiter geht es mit der Perfektionsschulung und der Prüfung.' : `Noch ${k(3000 - st.total)} km bis zu den 3.000 km.`;
+  el.innerHTML = `<button class="l17card" id="l17btn">
+    <span class="top"><b>L17-Ausbildung${c.learner ? ' · ' + esc(c.learner) : ''}</b><span>${k(st.total)} / 3.000 km</span></span>
+    <span class="bar"><i style="width:${Math.min(100, st.total / 30)}%"></i></span>
+    <span class="steps">
+      <span class="${st.d1 ? 'ok' : ''}">Vor der 1. begleitenden Schulung: ${k(st.p1)} / 1.000 km${st.d1 ? ' · Schulung am ' + fullDate(st.d1) : ''}</span>
+      <span class="${st.d2 ? 'ok' : ''}">Zwischen 1. und 2. Schulung: ${k(st.p2)} / 1.000 km${st.d2 ? ' · Schulung am ' + fullDate(st.d2) : ''}</span>
+    </span>
+    <span class="next">${next}</span></button>`;
+  $('#l17btn').onclick = () => openSettings('l17');
+}
+function openVehicleSwitch() {
+  const vs = vehicles(), cur = curVehicle();
+  openSheet(`
+    <div class="sheet-head"><h3>Fahrzeug</h3><button class="btn small" data-close>Schließen</button></div>
+    <div class="pick">${vs.map(v => `<button class="btn" data-v="${v.id}" aria-pressed="${cur && v.id === cur.id}">${esc(vehLabel(v))}<br><small class="hint">KM-Stand zuletzt: ${lastTrip(v.id)?.odoEnd != null ? fmtInt(lastTrip(v.id).odoEnd) : '–'}</small></button>`).join('')}</div>
+    ${S.active ? '<p class="hint">Die laufende Fahrt bleibt beim Fahrzeug, mit dem sie gestartet wurde.</p>' : ''}
+    <button class="btn" id="vManage">Fahrzeuge verwalten</button>`, sh => {
+    sh.querySelectorAll('[data-v]').forEach(b => b.onclick = async () => { S.settings.vehicleId = b.dataset.v; await store.set('settings', S.settings); closeSheet(); render(); toast(`Fahrzeug: ${vehLabel(curVehicle())}`); });
+    sh.querySelector('#vManage').onclick = () => openSettings('vehicles');
+  });
+}
 
 function renderSummary() {
   const ts = S.trips.filter(t => !t.draft && t.type === 'dienstlich' && new Date(t.start.t).getFullYear() === S.year);
@@ -882,10 +970,8 @@ function renderControl() {
       <div><span class="lbl">GPS-Strecke</span><span class="v" id="liveKm">0,0 km</span></div>
       <div><span class="lbl">GPS-Genauigkeit</span><span class="v" id="liveAcc">–</span></div>
     </div>
-    <div class="seg" role="group" aria-label="Fahrtart">
-      <button data-type="dienstlich" aria-pressed="${a.type === 'dienstlich'}">Dienstlich</button>
-      <button data-type="privat" aria-pressed="${a.type === 'privat'}">Privat</button>
-    </div>
+    <p class="hint" style="margin:0">Fahrzeug: <b>${esc(vehLabel(vehById(a.vehicleId)) || '–')}</b></p>
+    ${segHtml(a.type)}
     <div class="row2">
       ${odoFieldHtml('r_odo', 'KM-Stand Beginn', a.odoStart, a.id + ':start', a.photoStart)}
       <label class="field"><span class="lbl">Zweck / Kunde</span><input id="r_purpose" value="${esc(a.purpose)}" placeholder="kann auch am Ende"></label>
@@ -897,7 +983,7 @@ function renderControl() {
   $('#r_odo').oninput = e => { a.odoStart = num(e.target.value); saveActive(); };
   $('#r_purpose').oninput = e => { a.purpose = e.target.value; saveActive(); };
   $('#stopBtn').onclick = stopTrip;
-  runCam = { root: el, expected: () => lastTrip()?.odoEnd ?? null, onPhoto: () => { a.photoStart = true; saveActive(); renderThumbs($('#runThumbs'), a.id); } };
+  runCam = { root: el, expected: () => lastTrip(a.vehicleId)?.odoEnd ?? null, onPhoto: () => { a.photoStart = true; saveActive(); renderThumbs($('#runThumbs'), a.id); } };
   bindCams(el, runCam.expected, runCam.onPhoto);
   if (a.photoStart) renderThumbs($('#runThumbs'), a.id);
   const upd = () => { const s = Math.floor((Date.now() - a.start.t) / 1000); const e = $('#elapsed'); if (e) e.textContent = `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`; };
@@ -922,10 +1008,15 @@ function renderLog() {
   for (const list of groups.values()) {
     const title = new Date(list[0].start.t).toLocaleDateString('de-AT', { month: 'long', year: 'numeric' });
     const km = list.filter(t => t.type === 'dienstlich' && !t.draft).reduce((s, t) => s + (t.km || 0), 0);
-    html += `<div class="month"><h2><span>${title}</span><span>${fmtKm(km)} km dienstlich</span></h2><div class="list">` +
+    const kl = list.filter(t => t.type === 'l17' && !t.draft).reduce((s, t) => s + (t.km || 0), 0);
+    html += `<div class="month"><h2><span>${title}</span><span>${fmtKm(km)} km dienstlich${kl ? ' · ' + fmtKm(kl) + ' L17' : ''}</span></h2><div class="list">` +
       list.map(t => `<button class="trip" data-id="${t.id}">
         <span class="d">${dayLabel(t.start.t)}<small>${timeVal(t.start.t)}${t.end ? '–' + timeVal(t.end.t) : ''}</small></span>
-        <span class="r"><b>${esc(routeLabel(t))}</b><span>${t.draft ? '<span class="pill draft">Zweck fehlt</span> ' : ''}${t.type === 'privat' ? '<span class="pill">Privat</span> ' : ''}${esc(t.purpose || '')}${t.client ? ' · ' + esc(t.client) : ''}${t.odoStart != null && t.odoEnd != null ? ` · KM ${fmtInt(t.odoStart)}–${fmtInt(t.odoEnd)}` : ''}</span></span>
+        <span class="r"><b>${esc(routeLabel(t))}</b><span>${t.draft ? '<span class="pill draft">Zweck fehlt</span> ' : ''}${t.type === 'privat' ? '<span class="pill">Privat</span> ' : ''}${t.type === 'l17' ? '<span class="pill">L17</span> ' : ''}${esc([
+          vehicles().length > 1 && t.vehicleId ? vehById(t.vehicleId)?.name : '',
+          t.type === 'l17' && t.companion ? 'mit ' + t.companion : '',
+          t.purpose, t.client,
+          t.odoStart != null && t.odoEnd != null ? `KM ${fmtInt(t.odoStart)}–${fmtInt(t.odoEnd)}` : ''].filter(Boolean).join(' · '))}</span></span>
         <span class="k">${fmtKm(t.km)}<small class="lbl">km</small></span></button>`).join('') + `</div></div>`;
   }
   $('#log').innerHTML = html;
@@ -985,10 +1076,10 @@ function startTrip() {
   else handle({ mode, req });
 }
 function beginTrip() {
-  const t0 = Date.now(), last = lastTrip(), id = uid();
+  const t0 = Date.now(), veh = curVehicle(), last = lastTrip(veh?.id), id = uid();
   navigator.storage?.persist?.().catch(() => {});
   S.active = {
-    id, type: S.settings.defaultType || 'dienstlich', purpose: '', odoStart: last?.odoEnd ?? null,
+    id, vehicleId: veh?.id || null, type: S.settings.defaultType || 'dienstlich', purpose: '', odoStart: last?.odoEnd ?? null,
     start: { t: t0, lat: null, lng: null, acc: null, addr: '' }, track: [],
   };
   saveActive(); render(); startWatch();
@@ -1036,7 +1127,8 @@ async function stopTripGps(choice) {
   let km = gpsGood ? st.km : (rt ? rt.km : st.km);
   km = round1(km);
   const trip = {
-    id: a.id, type: a.type, purpose: a.purpose || '', client: '', note: '',
+    id: a.id, vehicleId: a.vehicleId || curVehicle()?.id || null, type: a.type, purpose: a.purpose || '', client: '', note: '',
+    companion: companions()[0] || '', weather: '',
     start: { ...a.start, addr: sAddr || '' }, end: { ...end, addr: eAddr || '' },
     track: a.track, routeLine: rt ? rt.line : null,
     kmGps: round1(st.km), kmRoute: rt ? round1(rt.km) : null, kmSource: gpsGood ? 'GPS-Aufzeichnung' : (rt ? 'Routenberechnung' : 'GPS-Aufzeichnung (lückenhaft)'),
@@ -1044,6 +1136,7 @@ async function stopTripGps(choice) {
     created: Date.now(), updated: Date.now(), changes: [], manual: false, draft: true,
     photos: { start: !!a.photoStart, end: false },
   };
+  trip.light = tripLight(trip);
   await store.putTrip(trip);
   S.trips.push(trip); S.active = null; await saveActive();
   S.year = new Date(trip.start.t).getFullYear();
@@ -1053,9 +1146,9 @@ async function stopTripGps(choice) {
   else if (c.mode === 'manual') focusInput('f_odoEnd');
 }
 function newManualTrip() {
-  const now = Date.now(), last = lastTrip();
+  const now = Date.now(), veh = curVehicle(), last = lastTrip(veh?.id);
   return {
-    id: uid(), type: S.settings.defaultType || 'dienstlich', purpose: '', client: '', note: '',
+    id: uid(), vehicleId: veh?.id || null, type: S.settings.defaultType || 'dienstlich', purpose: '', client: '', note: '', companion: companions()[0] || '', weather: '', light: '',
     start: { t: now - 3600e3, lat: null, lng: null, addr: '' }, end: { t: now, lat: null, lng: null, addr: '' },
     track: [], routeLine: null, kmGps: null, kmRoute: null, kmSource: 'Manuell',
     km: null, odoStart: last?.odoEnd ?? null, odoEnd: null,
@@ -1064,9 +1157,9 @@ function newManualTrip() {
 }
 
 /* ---------- trip form ---------- */
-const FIELDS = [['date', 'Datum'], ['tStart', 'Beginn'], ['tEnd', 'Ende'], ['from', 'Abfahrtsort'], ['to', 'Zielort'], ['type', 'Fahrtart'], ['purpose', 'Zweck'], ['client', 'Kunde/Ort'], ['odoStart', 'KM-Stand Beginn'], ['odoEnd', 'KM-Stand Ende'], ['km', 'Gefahrene km'], ['note', 'Notiz']];
+const FIELDS = [['date', 'Datum'], ['tStart', 'Beginn'], ['tEnd', 'Ende'], ['from', 'Abfahrtsort'], ['to', 'Zielort'], ['vehicle', 'Fahrzeug'], ['type', 'Fahrtart'], ['purpose', 'Zweck'], ['client', 'Kunde/Ort'], ['companion', 'Begleitperson'], ['weather', 'Straßenzustand/Witterung'], ['light', 'Tageszeit'], ['odoStart', 'KM-Stand Beginn'], ['odoEnd', 'KM-Stand Ende'], ['km', 'Gefahrene km'], ['note', 'Notiz']];
 function snapshot(t) {
-  return { date: dateVal(t.start.t), tStart: timeVal(t.start.t), tEnd: t.end ? timeVal(t.end.t) : '', from: t.start.addr || '', to: t.end?.addr || '', type: t.type, purpose: t.purpose || '', client: t.client || '', odoStart: t.odoStart ?? '', odoEnd: t.odoEnd ?? '', km: t.km ?? '', note: t.note || '' };
+  return { date: dateVal(t.start.t), tStart: timeVal(t.start.t), tEnd: t.end ? timeVal(t.end.t) : '', from: t.start.addr || '', to: t.end?.addr || '', vehicle: vehLabel(vehById(t.vehicleId)), type: typeLabel(t.type), purpose: t.purpose || '', client: t.client || '', companion: t.companion || '', weather: t.weather || '', light: t.light || '', odoStart: t.odoStart ?? '', odoEnd: t.odoEnd ?? '', km: t.km ?? '', note: t.note || '' };
 }
 function openTripForm(trip, { isNew }) {
   const v = snapshot(trip);
@@ -1087,12 +1180,17 @@ function openTripForm(trip, { isNew }) {
       </div>
       <label class="field"><span class="lbl">Abfahrtsort</span><input id="f_from" value="${esc(v.from)}" placeholder="Straße, PLZ Ort" autocomplete="street-address"></label>
       <label class="field"><span class="lbl">Zielort</span><input id="f_to" value="${esc(v.to)}" placeholder="Straße, PLZ Ort"></label>
-      <div class="seg" role="group" aria-label="Fahrtart">
-        <button type="button" data-type="dienstlich" aria-pressed="${type === 'dienstlich'}">Dienstlich</button>
-        <button type="button" data-type="privat" aria-pressed="${type === 'privat'}">Privat</button>
-      </div>
+      ${vehicles().length > 1 ? `<label class="field"><span class="lbl">Fahrzeug</span><select id="f_vehicle">${vehicles().map(x => `<option value="${x.id}" ${x.id === (trip.vehicleId || curVehicle()?.id) ? 'selected' : ''}>${esc(vehLabel(x))}</option>`).join('')}</select></label>` : ''}
+      ${segHtml(type)}
+      <fieldset class="box" id="l17box" ${type === 'l17' ? '' : 'hidden'}><legend>L17-Fahrtenprotokoll</legend>
+        <label class="field" id="w_comp"><span class="lbl">Begleitperson</span><input id="f_companion" list="compList" value="${esc(trip.companion || companions()[0] || '')}" placeholder="Name der Begleitperson"><datalist id="compList">${companions().map(c => `<option value="${esc(c)}">`).join('')}</datalist><span class="msg" hidden>Bitte die Begleitperson eintragen.</span></label>
+        <div class="row2">
+          <label class="field"><span class="lbl">Straßenzustand / Witterung</span><input id="f_weather" list="wxList" value="${esc(trip.weather || '')}" placeholder="z.B. trocken"><datalist id="wxList">${['trocken', 'nass', 'Regen', 'Schnee', 'Glätte', 'Nebel', 'Wind'].map(x => `<option value="${x}">`).join('')}</datalist></label>
+          <label class="field"><span class="lbl">Tageszeit</span><select id="f_light">${[...new Set([trip.light || tripLight(trip), 'Tag', 'Dämmerung', 'Dunkelheit'])].map(x => `<option ${x === (trip.light || tripLight(trip)) ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
+        </div>
+      </fieldset>
       <label class="field" id="w_purpose"><span class="lbl">Zweck der Fahrt</span><input id="f_purpose" value="${esc(v.purpose)}" placeholder="z.B. Kundentermin, Baustelle, Schulung"><span class="msg" hidden>Für dienstliche Fahrten braucht das Finanzamt einen Zweck.</span></label>
-      <label class="field"><span class="lbl">Kunde / besuchte Stelle</span><input id="f_client" value="${esc(v.client)}" placeholder="optional"></label>
+      <label class="field" id="w_client"><span class="lbl">Kunde / besuchte Stelle</span><input id="f_client" value="${esc(v.client)}" placeholder="optional"></label>
       <div class="row2">
         ${odoFieldHtml('f_odoStart', 'KM-Stand Beginn', v.odoStart, trip.id + ':start', trip.photos?.start)}
         ${odoFieldHtml('f_odoEnd', 'KM-Stand Ende', v.odoEnd, trip.id + ':end', trip.photos?.end)}
@@ -1109,12 +1207,14 @@ function openTripForm(trip, { isNew }) {
       <div class="confirm" id="discardConfirm" hidden><span>Diese Fahrt wirklich verwerfen?</span><div class="actions"><button class="btn danger" type="button" id="discardYes">Ja, verwerfen</button><button class="btn" type="button" id="discardNo">Behalten</button></div></div>
     </form>`, sheet => {
     const f = id => sheet.querySelector('#f_' + id);
-    sheet.querySelectorAll('.seg button').forEach(b => b.onclick = () => { type = b.dataset.type; sheet.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', x === b)); });
+    const typeUi = () => { sheet.querySelector('#l17box').hidden = type !== 'l17'; sheet.querySelector('#w_client').hidden = type === 'l17'; f('purpose').placeholder = type === 'l17' ? 'z.B. Übungsfahrt Freiland, Autobahn' : 'z.B. Kundentermin, Baustelle, Schulung'; };
+    sheet.querySelectorAll('.seg button').forEach(b => b.onclick = () => { type = b.dataset.type; sheet.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', x === b)); typeUi(); });
+    typeUi();
     const syncFromKm = () => { const s = num(f('odoStart').value), k = num(f('km').value); if (s != null && k != null) f('odoEnd').value = Math.round(s + k); };
     f('km').oninput = syncFromKm;
     f('odoStart').oninput = () => { const s = num(f('odoStart').value), e = num(f('odoEnd').value); if (s != null && e != null && e >= s && trip.photos?.end) f('km').value = String(e - s).replace('.', ','); else syncFromKm(); };
     trip.photos = trip.photos || { start: false, end: false };
-    formCam = { root: sheet, expected: id => id === 'f_odoEnd' ? num(f('odoStart').value) : (lastTrip()?.odoEnd ?? null), onPhoto: w => { trip.photos[w] = true; if (!trip.unsaved) store.putTrip(trip); renderThumbs(sheet.querySelector('#formThumbs'), trip.id); } };
+    formCam = { root: sheet, expected: id => id === 'f_odoEnd' ? num(f('odoStart').value) : (lastTrip(f('vehicle')?.value || trip.vehicleId)?.odoEnd ?? null), onPhoto: w => { trip.photos[w] = true; if (!trip.unsaved) store.putTrip(trip); renderThumbs(sheet.querySelector('#formThumbs'), trip.id); } };
     bindCams(sheet, formCam.expected, formCam.onPhoto);
     renderThumbs(sheet.querySelector('#formThumbs'), trip.id);
     f('odoEnd').oninput = () => { const s = num(f('odoStart').value), e = num(f('odoEnd').value); if (s != null && e != null && e >= s) f('km').value = String(e - s).replace('.', ','); };
@@ -1144,10 +1244,11 @@ function openTripForm(trip, { isNew }) {
     sheet.querySelector('#tf').onsubmit = async e => {
       e.preventDefault();
       const km = num(f('km').value), purpose = f('purpose').value.trim();
-      const pErr = type === 'dienstlich' && !purpose, kErr = km == null;
+      const pErr = type === 'dienstlich' && !purpose, kErr = km == null, cErr = type === 'l17' && !f('companion').value.trim();
       sheet.querySelector('#w_purpose').classList.toggle('err', pErr); sheet.querySelector('#w_purpose .msg').hidden = !pErr;
       sheet.querySelector('#w_km').classList.toggle('err', kErr); sheet.querySelector('#w_km .msg').hidden = !kErr;
-      if (pErr || kErr) return;
+      sheet.querySelector('#w_comp').classList.toggle('err', cErr); sheet.querySelector('#w_comp .msg').hidden = !cErr;
+      if (pErr || kErr || cErr) return;
       const date = f('date').value || dateVal(trip.start.t);
       const sT = fromInputs(date, f('tStart').value);
       let eT = fromInputs(date, f('tEnd').value || f('tStart').value);
@@ -1155,7 +1256,9 @@ function openTripForm(trip, { isNew }) {
       const before = snapshot(trip);
       trip.start.t = sT; trip.end = trip.end || {}; trip.end.t = eT;
       trip.start.addr = f('from').value.trim(); trip.end.addr = f('to').value.trim();
-      trip.type = type; trip.purpose = purpose; trip.client = f('client').value.trim(); trip.note = f('note').value.trim();
+      trip.type = type; trip.purpose = purpose; trip.client = type === 'l17' ? '' : f('client').value.trim(); trip.note = f('note').value.trim();
+      if (f('vehicle')) trip.vehicleId = f('vehicle').value; else if (!trip.vehicleId) trip.vehicleId = curVehicle()?.id || null;
+      if (type === 'l17') { trip.companion = f('companion').value.trim(); trip.weather = f('weather').value.trim(); trip.light = f('light').value; }
       trip.odoStart = num(f('odoStart').value); trip.odoEnd = num(f('odoEnd').value); trip.km = round1(km);
       if (trip.odoStart != null && trip.odoEnd != null && Math.abs(trip.odoEnd - trip.odoStart - trip.km) < 0.05) trip.kmSource = trip.photos?.start && trip.photos?.end ? 'KM-Stand laut Tacho-Foto' : 'KM-Stand';
       if (!isNew) {
@@ -1185,7 +1288,9 @@ function openDetail(t) {
       <dt>Zeit</dt><dd>${timeVal(t.start.t)} – ${t.end ? timeVal(t.end.t) : '?'}</dd>
       <dt>Von</dt><dd>${esc(t.start.addr || '–')}</dd>
       <dt>Nach</dt><dd>${esc(t.end?.addr || '–')}</dd>
-      <dt>Fahrtart</dt><dd>${t.type === 'privat' ? 'Privat' : 'Dienstlich'}</dd>
+      <dt>Fahrzeug</dt><dd>${esc(vehLabel(vehById(t.vehicleId)) || '–')}</dd>
+      <dt>Fahrtart</dt><dd>${typeLabel(t.type)}</dd>
+      ${t.type === 'l17' ? `<dt>Begleitperson</dt><dd>${esc(t.companion || '–')}</dd><dt>Witterung</dt><dd>${esc(t.weather || '–')}</dd><dt>Tageszeit</dt><dd>${esc(t.light || tripLight(t))}</dd>` : ''}
       <dt>Zweck</dt><dd>${esc(t.purpose || '–')}</dd>
       ${t.client ? `<dt>Kunde</dt><dd>${esc(t.client)}</dd>` : ''}
       <dt>KM-Stand</dt><dd>${t.odoStart != null ? fmtInt(t.odoStart) : '–'} → ${t.odoEnd != null ? fmtInt(t.odoEnd) : '–'}</dd>
@@ -1227,7 +1332,11 @@ function drawMap(el, t) {
 }
 
 /* ---------- export ---------- */
-function yearTrips(y) { return S.trips.filter(t => !t.draft && new Date(t.start.t).getFullYear() === y).sort((a, b) => a.start.t - b.start.t); }
+function yearTrips(y, opts = {}) {
+  return S.trips.filter(t => !t.draft && (!y || new Date(t.start.t).getFullYear() === y)
+    && (opts.kind === 'l17' ? t.type === 'l17' : t.type !== 'l17')
+    && (!opts.vehicleId || t.vehicleId === opts.vehicleId)).sort((a, b) => a.start.t - b.start.t);
+}
 async function deliverFile(name, blob) {
   const file = new File([blob], name, { type: blob.type });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -1237,43 +1346,86 @@ async function deliverFile(name, blob) {
   const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
-function csvFor(y) {
-  const q = v => { const s = String(v ?? ''); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-  const dec = n => n == null ? '' : String(round1(n)).replace('.', ',');
-  const rate = S.settings.rate || 0;
-  const head = ['Datum', 'Beginn', 'Ende', 'Abfahrtsort', 'Zielort', 'Zweck der Fahrt', 'Kunde/besuchte Stelle', 'Fahrtart', 'KM-Stand Beginn', 'KM-Stand Ende', 'Gefahrene km', 'Kilometergeld EUR', 'Erfassung', 'Foto KM-Stand', 'Geändert'];
-  const rows = yearTrips(y).map(t => [fullDate(t.start.t), timeVal(t.start.t), t.end ? timeVal(t.end.t) : '', t.start.addr, t.end?.addr, t.purpose, t.client, t.type === 'privat' ? 'privat' : 'dienstlich', t.odoStart ?? '', t.odoEnd ?? '', dec(t.km), t.type === 'dienstlich' ? ((t.km || 0) * rate).toFixed(2).replace('.', ',') : '', t.manual ? 'nachgetragen' : 'GPS live', photoLabel(t), t.changes?.length ? 'ja (' + t.changes.length + ')' : 'nein']);
-  const dk = yearTrips(y).filter(t => t.type === 'dienstlich').reduce((s, t) => s + (t.km || 0), 0);
-  rows.push([]); rows.push(['Summe dienstlich', '', '', '', '', '', '', '', '', '', dec(dk), (Math.min(dk, KM_LIMIT) * rate).toFixed(2).replace('.', ',')]);
-  return '﻿' + [head, ...rows].map(r => r.map(q).join(';')).join('\r\n');
+const csvQ = v => { const x = String(v ?? ''); return /[";\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x; };
+const csvDec = n => n == null ? '' : String(round1(n)).replace('.', ',');
+const toCsv = rows => '﻿' + rows.map(r => r.map(csvQ).join(';')).join('\r\n');
+function csvFor(y, vid) {
+  const rate = S.settings.rate || 0, ts = yearTrips(y, { vehicleId: vid });
+  const head = ['Datum', 'Beginn', 'Ende', 'Fahrzeug', 'Abfahrtsort', 'Zielort', 'Zweck der Fahrt', 'Kunde/besuchte Stelle', 'Fahrtart', 'KM-Stand Beginn', 'KM-Stand Ende', 'Gefahrene km', 'Kilometergeld EUR', 'Erfassung', 'Foto KM-Stand', 'Geändert'];
+  const rows = ts.map(t => [fullDate(t.start.t), timeVal(t.start.t), t.end ? timeVal(t.end.t) : '', vehLabel(vehById(t.vehicleId)), t.start.addr, t.end?.addr, t.purpose, t.client, t.type === 'privat' ? 'privat' : 'dienstlich', t.odoStart ?? '', t.odoEnd ?? '', csvDec(t.km), t.type === 'dienstlich' ? ((t.km || 0) * rate).toFixed(2).replace('.', ',') : '', t.manual ? 'nachgetragen' : 'GPS live', photoLabel(t), t.changes?.length ? 'ja (' + t.changes.length + ')' : 'nein']);
+  const dk = ts.filter(t => t.type === 'dienstlich').reduce((a, t) => a + (t.km || 0), 0);
+  rows.push([]); rows.push(['Summe dienstlich', '', '', '', '', '', '', '', '', '', '', csvDec(dk), (Math.min(dk, KM_LIMIT) * rate).toFixed(2).replace('.', ',')]);
+  return toCsv([head, ...rows]);
 }
-function buildPrint(y) {
-  const ts = yearTrips(y), rate = S.settings.rate || 0;
-  const dk = ts.filter(t => t.type === 'dienstlich').reduce((s, t) => s + (t.km || 0), 0);
+// L17 rows with the companion-training milestones in between
+function l17Rows(y, vid) {
+  const c = S.settings.l17 || {}, st = l17Stats(), out = [];
+  let sum = 0, mark1 = !!st.d1, mark2 = !!st.d2;
+  for (const t of st.trips) {
+    if (mark1 && t.start.t > st.d1) { out.push({ mark: `1. begleitende Schulung am ${fullDate(st.d1)}`, sum }); mark1 = false; }
+    if (mark2 && t.start.t > st.d2) { out.push({ mark: `2. begleitende Schulung am ${fullDate(st.d2)}`, sum }); mark2 = false; }
+    sum += t.km || 0;
+    if ((!y || new Date(t.start.t).getFullYear() === y) && (!vid || t.vehicleId === vid)) out.push({ t, sum });
+  }
+  if (mark1) out.push({ mark: `1. begleitende Schulung am ${fullDate(st.d1)}`, sum });
+  if (mark2) out.push({ mark: `2. begleitende Schulung am ${fullDate(st.d2)}`, sum });
+  return out;
+}
+function csvL17(y, vid) {
+  const c = S.settings.l17 || {};
+  const head = ['Datum', 'Uhrzeit', 'Tageszeit', 'Fahrstrecke / Ziel', 'Straßenzustand / Witterung', 'Kfz-Kennzeichen', 'KM-Stand Beginn', 'KM-Stand Ende', 'Gefahrene km', 'Summe km', 'Begleitperson', 'Unterschrift Begleitperson', 'Unterschrift Bewerber/in'];
+  const rows = l17Rows(y, vid).map(r => r.mark ? [r.mark, '', '', '', '', '', '', '', '', csvDec(r.sum)] : [fullDate(r.t.start.t), `${timeVal(r.t.start.t)}–${r.t.end ? timeVal(r.t.end.t) : ''}`, r.t.light || tripLight(r.t), `${r.t.start.addr || ''} – ${r.t.end?.addr || ''}${r.t.purpose ? ' (' + r.t.purpose + ')' : ''}`, r.t.weather, vehById(r.t.vehicleId)?.plate || vehLabel(vehById(r.t.vehicleId)), r.t.odoStart ?? '', r.t.odoEnd ?? '', csvDec(r.t.km), csvDec(r.sum), r.t.companion, '', '']);
+  return toCsv([['Fahrtenprotokoll gemäß § 19 Abs. 8 FSG (L17)'], ['Bewerber/in', c.learner || ''], [], head, ...rows]);
+}
+function buildPrint(y, vid) {
+  const ts = yearTrips(y, { vehicleId: vid }), rate = S.settings.rate || 0;
+  const dk = ts.filter(t => t.type === 'dienstlich').reduce((a, t) => a + (t.km || 0), 0);
   $('#print').innerHTML = `<h1>Fahrtenbuch ${y}</h1>
-    <p>${esc(S.settings.name || '')}${S.settings.vehicle ? ' · Fahrzeug: ' + esc(S.settings.vehicle) : ''} · Kilometergeld ${fmtEur(rate)}/km</p>
-    <table><thead><tr><th>Datum</th><th>Zeit</th><th>Von</th><th>Nach</th><th>Zweck / Kunde</th><th>Art</th><th class="n">KM-Stand Beginn</th><th class="n">KM-Stand Ende</th><th class="n">km</th><th class="n">€</th><th>Foto</th></tr></thead><tbody>
-    ${ts.map(t => `<tr><td>${fullDate(t.start.t)}</td><td>${timeVal(t.start.t)}–${t.end ? timeVal(t.end.t) : ''}</td><td>${esc(t.start.addr)}</td><td>${esc(t.end?.addr)}</td><td>${esc(t.purpose)}${t.client ? ' / ' + esc(t.client) : ''}${t.changes?.length ? ' *' : ''}</td><td>${t.type === 'privat' ? 'privat' : 'dienstl.'}</td><td class="n">${fmtInt(t.odoStart)}</td><td class="n">${fmtInt(t.odoEnd)}</td><td class="n">${fmtKm(t.km)}</td><td class="n">${t.type === 'dienstlich' ? fmtEur((t.km || 0) * rate) : ''}</td><td>${t.photos?.start && t.photos?.end ? '✓' : ''}</td></tr>`).join('')}
-    <tr><td colspan="8"><b>Summe dienstlich</b></td><td class="n"><b>${fmtKm(dk)}</b></td><td class="n"><b>${fmtEur(Math.min(dk, KM_LIMIT) * rate)}</b></td><td></td></tr>
+    <p>${esc(S.settings.name || '')}${vid ? ' · Fahrzeug: ' + esc(vehLabel(vehById(vid))) : ''} · Kilometergeld ${fmtEur(rate)}/km</p>
+    <table><thead><tr><th>Datum</th><th>Zeit</th>${vid ? '' : '<th>Fahrzeug</th>'}<th>Von</th><th>Nach</th><th>Zweck / Kunde</th><th>Art</th><th class="n">KM-Stand Beginn</th><th class="n">KM-Stand Ende</th><th class="n">km</th><th class="n">€</th><th>Foto</th></tr></thead><tbody>
+    ${ts.map(t => `<tr><td>${fullDate(t.start.t)}</td><td>${timeVal(t.start.t)}–${t.end ? timeVal(t.end.t) : ''}</td>${vid ? '' : `<td>${esc(vehLabel(vehById(t.vehicleId)))}</td>`}<td>${esc(t.start.addr)}</td><td>${esc(t.end?.addr)}</td><td>${esc(t.purpose)}${t.client ? ' / ' + esc(t.client) : ''}${t.changes?.length ? ' *' : ''}</td><td>${t.type === 'privat' ? 'privat' : 'dienstl.'}</td><td class="n">${fmtInt(t.odoStart)}</td><td class="n">${fmtInt(t.odoEnd)}</td><td class="n">${fmtKm(t.km)}</td><td class="n">${t.type === 'dienstlich' ? fmtEur((t.km || 0) * rate) : ''}</td><td>${t.photos?.start && t.photos?.end ? '✓' : ''}</td></tr>`).join('')}
+    <tr><td colspan="${vid ? 8 : 9}"><b>Summe dienstlich</b></td><td class="n"><b>${fmtKm(dk)}</b></td><td class="n"><b>${fmtEur(Math.min(dk, KM_LIMIT) * rate)}</b></td><td></td></tr>
     </tbody></table>
     <p>* nachträglich geändert, Änderungen sind in der App je Fahrt protokolliert. Erstellt am ${new Date().toLocaleString('de-AT')}.</p>`;
 }
+function buildPrintL17(y, vid) {
+  const c = S.settings.l17 || {}, rows = l17Rows(y, vid), st = l17Stats();
+  $('#print').innerHTML = `<h1>Fahrtenprotokoll gemäß § 19 Abs. 8 FSG (L17)</h1>
+    <p>Bewerber/in: <b>${esc(c.learner || '__________________')}</b>${c.birth ? ' · geb. ' + esc(fullDate(fromInputs(c.birth))) : ''} · Begleitperson(en): ${esc(companions().join(', ') || '__________________')}</p>
+    <table><thead><tr><th>Datum</th><th>Uhrzeit</th><th>Tageszeit</th><th>Fahrstrecke / Ziel</th><th>Straßenzustand, Witterung</th><th>Kennzeichen</th><th class="n">KM-Stand Beginn</th><th class="n">KM-Stand Ende</th><th class="n">km</th><th class="n">Summe</th><th>Unterschrift Begleitperson</th><th>Unterschrift Bewerber/in</th></tr></thead><tbody>
+    ${rows.map(r => r.mark ? `<tr><td colspan="9"><b>${esc(r.mark)}</b> (Datum/Unterschrift Fahrlehrer: ____________)</td><td class="n"><b>${fmtKm(r.sum)}</b></td><td></td><td></td></tr>` : `<tr><td>${fullDate(r.t.start.t)}</td><td>${timeVal(r.t.start.t)}–${r.t.end ? timeVal(r.t.end.t) : ''}</td><td>${esc(r.t.light || tripLight(r.t))}</td><td>${esc(r.t.start.addr || '')} – ${esc(r.t.end?.addr || '')}${r.t.purpose ? ' (' + esc(r.t.purpose) + ')' : ''}</td><td>${esc(r.t.weather || '')}</td><td>${esc(vehById(r.t.vehicleId)?.plate || vehLabel(vehById(r.t.vehicleId)))}</td><td class="n">${fmtInt(r.t.odoStart)}</td><td class="n">${fmtInt(r.t.odoEnd)}</td><td class="n">${fmtKm(r.t.km)}</td><td class="n">${fmtKm(r.sum)}</td><td style="min-width:28mm"></td><td style="min-width:28mm"></td></tr>`).join('')}
+    </tbody></table>
+    <p>Gesamt L17: <b>${fmtKm(st.total)} km</b>. Erstellt am ${new Date().toLocaleString('de-AT')}. Jede Zeile wird von Begleitperson und Bewerber/in unterschrieben.</p>`;
+}
 function openExport() {
+  const hasL17 = l17On() || S.trips.some(t => t.type === 'l17');
   const ys = yearsAvailable();
   openSheet(`
     <div class="sheet-head"><h3>Export</h3><button class="btn small" data-close>Schließen</button></div>
-    <label class="field"><span class="lbl">Jahr</span><select id="x_year">${ys.map(y => `<option ${y === S.year ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
+    ${hasL17 ? `<label class="field"><span class="lbl">Was</span><select id="x_kind"><option value="work">Fahrtenbuch (Arbeit)</option><option value="l17">L17-Fahrtenprotokoll</option></select></label>` : ''}
+    <div class="row2">
+      <label class="field"><span class="lbl">Jahr</span><select id="x_year">${hasL17 ? '<option value="0">Alle Jahre</option>' : ''}${ys.map(y => `<option value="${y}" ${y === S.year ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
+      <label class="field"><span class="lbl">Fahrzeug</span><select id="x_veh"><option value="">Alle Fahrzeuge</option>${vehicles().map(v => `<option value="${v.id}">${esc(vehLabel(v))}</option>`).join('')}</select></label>
+    </div>
     <p class="hint" id="x_info"></p>
     <div class="actions">
       <button class="btn primary" id="x_csv">Excel-Tabelle (CSV)</button>
       <button class="btn" id="x_pdf">Druckansicht / PDF</button>
     </div>
     <p class="hint">Am iPhone: Druckansicht öffnen, dann im Druckmenü mit zwei Fingern auf die Vorschau aufziehen, um ein PDF zu teilen oder zu sichern.</p>`, sheet => {
-    const sel = sheet.querySelector('#x_year');
-    const info = () => { const y = +sel.value, ts = yearTrips(y), dk = ts.filter(t => t.type === 'dienstlich').reduce((s, t) => s + (t.km || 0), 0); sheet.querySelector('#x_info').textContent = `${ts.length} Fahrten, ${fmtKm(dk)} km dienstlich, Kilometergeld ${fmtEur(Math.min(dk, KM_LIMIT) * (S.settings.rate || 0))}.`; };
-    sel.onchange = info; info();
-    sheet.querySelector('#x_csv').onclick = () => deliverFile(`Fahrtenbuch_${sel.value}.csv`, new Blob([csvFor(+sel.value)], { type: 'text/csv;charset=utf-8' }));
-    sheet.querySelector('#x_pdf').onclick = () => { buildPrint(+sel.value); window.print(); };
+    const sel = sheet.querySelector('#x_year'), veh = sheet.querySelector('#x_veh'), kind = sheet.querySelector('#x_kind');
+    const k = () => kind ? kind.value : 'work';
+    const info = () => {
+      const y = +sel.value, vid = veh.value;
+      if (k() === 'l17') { const rs = l17Rows(y, vid).filter(r => r.t); const km = rs.reduce((a, r) => a + (r.t.km || 0), 0); sheet.querySelector('#x_info').textContent = `${rs.length} L17-Fahrten, ${fmtKm(km)} km.`; return; }
+      const ts = yearTrips(y, { vehicleId: vid }), dk = ts.filter(t => t.type === 'dienstlich').reduce((a, t) => a + (t.km || 0), 0);
+      sheet.querySelector('#x_info').textContent = `${ts.length} Fahrten, ${fmtKm(dk)} km dienstlich, Kilometergeld ${fmtEur(Math.min(dk, KM_LIMIT) * (S.settings.rate || 0))}.`;
+    };
+    sel.onchange = info; veh.onchange = info; if (kind) kind.onchange = info; info();
+    sheet.querySelector('#x_csv').onclick = () => k() === 'l17'
+      ? deliverFile(`L17_Fahrtenprotokoll${+sel.value ? '_' + sel.value : ''}.csv`, new Blob([csvL17(+sel.value, veh.value)], { type: 'text/csv;charset=utf-8' }))
+      : deliverFile(`Fahrtenbuch_${sel.value || 'alle'}.csv`, new Blob([csvFor(+sel.value, veh.value)], { type: 'text/csv;charset=utf-8' }));
+    sheet.querySelector('#x_pdf').onclick = () => { if (k() === 'l17') buildPrintL17(+sel.value, veh.value); else buildPrint(+sel.value, veh.value); window.print(); };
   });
 }
 function openBackup() {
@@ -1310,32 +1462,67 @@ function openBackup() {
     };
   });
 }
-function openSettings() {
-  const s = S.settings;
+function openSettings(focus) {
+  const s = S.settings, c = s.l17 || {};
+  let vs = vehicles().map(v => ({ ...v }));
   openSheet(`
     <div class="sheet-head"><h3>Einstellungen</h3><button class="btn small" data-close>Schließen</button></div>
-    <form id="sf" style="display:grid;gap:12px">
-      <label class="field"><span class="lbl">Name</span><input id="s_name" value="${esc(s.name)}" autocomplete="name"></label>
-      <label class="field"><span class="lbl">Fahrzeug / Kennzeichen</span><input id="s_vehicle" value="${esc(s.vehicle)}" placeholder="z.B. VW Golf, W-12345X"></label>
+    <form id="sf" style="display:grid;gap:14px">
+      <label class="field"><span class="lbl">Dein Name</span><input id="s_name" value="${esc(s.name)}" autocomplete="name"></label>
+      <fieldset class="box" id="sec_vehicles"><legend>Fahrzeuge</legend>
+        <div class="vlist" id="vlist"></div>
+        <button type="button" class="btn" id="vAdd">Fahrzeug hinzufügen</button>
+      </fieldset>
       <div class="row2">
         <label class="field"><span class="lbl">Kilometergeld € pro km</span><input id="s_rate" inputmode="decimal" value="${String(s.rate).replace('.', ',')}"></label>
-        <label class="field"><span class="lbl">Standard-Fahrtart</span><select id="s_type"><option value="dienstlich" ${s.defaultType === 'dienstlich' ? 'selected' : ''}>Dienstlich</option><option value="privat" ${s.defaultType === 'privat' ? 'selected' : ''}>Privat</option></select></label>
+        <label class="field"><span class="lbl">Standard-Fahrtart</span><select id="s_type">${Object.entries(TYPES).map(([k, l]) => `<option value="${k}" ${s.defaultType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div>
       <label class="field"><span class="lbl">KM-Stand bei Start und Ende</span><select id="s_odo">${[['ask', 'Jedes Mal fragen'], ['camera', 'Immer Tacho fotografieren'], ['manual', 'Immer selbst eintippen'], ['off', 'Nicht abfragen']].map(([k, l]) => `<option value="${k}" ${odoMode() === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <fieldset class="box" id="sec_l17"><legend>L17-Führerschein</legend>
+        <label class="check"><input type="checkbox" id="l_on" ${c.on ? 'checked' : ''}><span>L17-Übungsfahrten dokumentieren</span></label>
+        <div class="row2">
+          <label class="field"><span class="lbl">Bewerber/in</span><input id="l_learner" value="${esc(c.learner || '')}" placeholder="Name"></label>
+          <label class="field"><span class="lbl">Geburtsdatum</span><input id="l_birth" type="date" value="${esc(c.birth || '')}"></label>
+        </div>
+        <label class="field"><span class="lbl">Begleitperson(en), mit Komma getrennt</span><input id="l_comp" value="${esc(c.companions || '')}" placeholder="z.B. Thomas, Anna"></label>
+        <div class="row2">
+          <label class="field"><span class="lbl">1. begleitende Schulung am</span><input id="l_s1" type="date" value="${esc(c.s1 || '')}"></label>
+          <label class="field"><span class="lbl">2. begleitende Schulung am</span><input id="l_s2" type="date" value="${esc(c.s2 || '')}"></label>
+        </div>
+        <p class="hint" style="margin:0">Laut den Protokollvorlagen der Fahrschulen: mindestens 1.000 km vor der 1. und 1.000 km zwischen der 1. und 2. begleitenden Schulung, insgesamt mindestens 3.000 km. Das Protokoll ausdrucken und jede Fahrt von Begleitperson und Bewerber/in unterschreiben lassen. Im Zweifel bei der Fahrschule nachfragen.</p>
+      </fieldset>
       <p class="hint">App-Version ${APP_VERSION}. Neue Versionen lädt die App automatisch.</p>
       <p class="hint">Amtliches Kilometergeld für PKW seit 2025: 0,50 € pro km, höchstens 30.000 km im Jahr. Fahrten zwischen Wohnung und Arbeitsplatz gehören nicht ins Fahrtenbuch, dafür gibt es die Pendlerpauschale.</p>
       <button class="btn primary" type="submit">Speichern</button>
     </form>`, sheet => {
+    const vlist = sheet.querySelector('#vlist');
+    const readRows = () => vlist.querySelectorAll('.vrow').forEach((row, i) => { vs[i].name = row.querySelector('[data-f=name]').value.trim(); vs[i].plate = row.querySelector('[data-f=plate]').value.trim(); });
+    const drawV = () => {
+      vlist.innerHTML = vs.map((v, i) => {
+        const used = S.trips.some(t => t.vehicleId === v.id) || S.active?.vehicleId === v.id;
+        return `<div class="vrow"><label class="field"><span class="lbl">Bezeichnung</span><input data-f="name" id="v_name_${i}" value="${esc(v.name)}" placeholder="z.B. VW Golf"></label><label class="field"><span class="lbl">Kennzeichen</span><input data-f="plate" id="v_plate_${i}" value="${esc(v.plate)}" placeholder="W-12345X"></label><button type="button" class="btn small danger" data-del="${i}" ${used || vs.length < 2 ? 'disabled title="Fahrzeug hat bereits Fahrten"' : ''}>Entfernen</button></div>`;
+      }).join('');
+      vlist.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { readRows(); vs.splice(+b.dataset.del, 1); drawV(); });
+    };
+    drawV();
+    sheet.querySelector('#vAdd').onclick = () => { readRows(); vs.push({ id: uid(), name: '', plate: '' }); drawV(); vlist.querySelector('.vrow:last-child input').focus(); };
+    if (focus) setTimeout(() => sheet.querySelector('#sec_' + focus)?.scrollIntoView({ block: 'start' }), 50);
     sheet.querySelector('#sf').onsubmit = async e => {
-      e.preventDefault();
-      S.settings = { name: sheet.querySelector('#s_name').value.trim(), vehicle: sheet.querySelector('#s_vehicle').value.trim(), rate: num(sheet.querySelector('#s_rate').value) ?? 0.5, defaultType: sheet.querySelector('#s_type').value, odoMode: sheet.querySelector('#s_odo').value };
+      e.preventDefault(); readRows();
+      vs = vs.filter(v => v.name || v.plate || S.trips.some(t => t.vehicleId === v.id));
+      if (!vs.length) vs = [{ id: uid(), name: 'Mein Auto', plate: '' }];
+      vs.forEach(v => { if (!v.name) v.name = v.plate || 'Auto'; });
+      const q = id => sheet.querySelector('#' + id);
+      S.settings = { ...S.settings, name: q('s_name').value.trim(), vehicles: vs, vehicleId: vs.some(v => v.id === S.settings.vehicleId) ? S.settings.vehicleId : vs[0].id,
+        rate: num(q('s_rate').value) ?? 0.5, defaultType: q('s_type').value, odoMode: q('s_odo').value,
+        l17: { on: q('l_on').checked, learner: q('l_learner').value.trim(), birth: q('l_birth').value, companions: q('l_comp').value.trim(), s1: q('l_s1').value, s2: q('l_s2').value } };
       await store.set('settings', S.settings); closeSheet(); render(); toast('Einstellungen gespeichert.');
     };
   });
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-20.6';
+const APP_VERSION = '2026-10-20.8';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
@@ -1366,8 +1553,17 @@ function applyUpdate(v) {
     S.trips = (await store.trips()) || [];
     S.settings = { ...S.settings, ...((await store.get('settings')) || {}) };
     S.active = (await store.get('active')) || null;
+    // one vehicle from the old single "Fahrzeug" field
+    if (!Array.isArray(S.settings.vehicles) || !S.settings.vehicles.length) {
+      S.settings.vehicles = [{ id: 'v1', name: S.settings.vehicle || 'Mein Auto', plate: '' }];
+      S.settings.vehicleId = 'v1';
+      await store.set('settings', S.settings);
+    }
+    const v0 = S.settings.vehicles[0].id;
+    for (const t of S.trips) if (!t.vehicleId) { t.vehicleId = v0; await store.putTrip(t); }
+    if (S.active && !S.active.vehicleId) { S.active.vehicleId = v0; await saveActive(); }
   } catch (e) { toast('Speicher nicht verfügbar. Bitte nicht im privaten Modus öffnen.'); }
-  $('#settingsBtn').onclick = openSettings;
+  $('#settingsBtn').onclick = () => openSettings();
   $('#exportBtn').onclick = openExport;
   $('#backupBtn').onclick = openBackup;
   render();
