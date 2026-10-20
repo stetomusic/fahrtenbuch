@@ -1,6 +1,6 @@
 // Offline cache for the app shell. Maps, address lookup and routing need a connection.
-const CACHE = 'fahrtenbuch-v7';
-const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-192.png',
+const CACHE = 'fahrtenbuch-v8';
+const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg', './car-180.png', './car-192.png', './apple-touch-icon.png',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => Promise.allSettled(SHELL.map(u => c.add(u)))).then(() => self.skipWaiting()));

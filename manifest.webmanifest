@@ -8,8 +8,9 @@
   "background_color": "#eef2f0",
   "theme_color": "#0e6b50",
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
-    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+    { "src": "car-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+    { "src": "car-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "car-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "car-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
