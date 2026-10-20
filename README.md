@@ -13,8 +13,11 @@ Oben unter dem Titel steht das aktuelle Auto. Antippen, um zu wechseln. In den *
 ## L17-Führerschein
 In den **Einstellungen** „L17-Übungsfahrten dokumentieren“ einschalten, Name der Bewerberin oder des Bewerbers und die Begleitpersonen eintragen. Oben in der App wählst du dann zwischen **Fahrtenbuch Steuer** und **L17-Protokoll**. Jeder Modus zeigt nur seine eigenen Fahrten, Zahlen und Eingabefelder. Im L17-Modus werden Begleitperson, Straßenzustand/Witterung und Tageszeit (Tag, Dämmerung, Dunkelheit, automatisch aus Uhrzeit und Ort) mitgeschrieben. Die Karte oben zeigt den Fortschritt: 1.000 km vor der 1. begleitenden Schulung, 1.000 km bis zur 2., insgesamt 3.000 km. Die Schulungstermine trägst du in den Einstellungen ein. Im L17-Modus erstellt **Export & PDF** das Protokoll zum Ausdrucken mit Spalten für die Unterschriften. L17-Fahrten zählen nicht zum Kilometergeld.
 
+## Jahresübersicht
+Unter den Jahreszahlen zeigt ein Balken, wie viele der 30.000 km im Jahr schon erreicht sind. „Jahresübersicht“ zeigt pro Jahr dienstliche und private km, das Kilometergeld und den Betrag für die Arbeitnehmerveranlagung (L1, Reisekosten, Kennzahl 721). Was der Arbeitgeber schon steuerfrei ersetzt hat, trägst du dort ein, es wird abgezogen.
+
 ## Wichtig
-- Die Daten liegen nur auf deinem iPhone. Unter **Sicherung** regelmäßig eine Sicherung in iCloud Drive speichern.
+- Die Daten liegen nur auf deinem iPhone. Unter **Sicherung** regelmäßig eine Sicherung in iCloud Drive speichern. Die App erinnert dich monatlich daran, wenn es neue Fahrten seit der letzten Sicherung gibt (in den Einstellungen auf wöchentlich oder aus stellbar).
 - Wird die App während der Fahrt geschlossen, berechnet sie die km am Ende über die Route (Start → Ziel). Umwege fehlen dann.
 - Die Tacho-Fotos werden mit der Fahrt gespeichert und in der Sicherung mitgesichert. In den Einstellungen kannst du festlegen, ob die App jedes Mal fragt, immer die Kamera öffnet, immer eintippen lässt oder gar nicht nach dem KM-Stand fragt.
 - Neue Versionen lädt die App automatisch, sobald du sie öffnest.

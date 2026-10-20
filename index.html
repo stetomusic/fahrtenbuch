@@ -120,6 +120,19 @@ header.top .sub { color: var(--muted); font-size: 14px; }
 .row3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .seg button { border: 0; background: var(--bg); padding: 10px; min-height: 44px; font-weight: 600; }
+.yearbar { grid-column: 1 / -1; background: none; border: 0; padding: 0; text-align: left; color: inherit; display: grid; gap: 6px; }
+.yearbar .yl, .yrow .yh { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--muted); }
+.yearbar .yl span:last-child { color: var(--accent); font-weight: 600; }
+.ylist { display: grid; gap: 12px; }
+.yrow { border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 8px; }
+.yrow .yh b { font: 600 20px var(--font-display); color: var(--ink); }
+.yrow dl { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; margin: 0; align-items: center; }
+.yrow dt { color: var(--muted); font-size: 14px; } .yrow dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.yrow dd small { color: var(--muted); }
+.yrow .refund { width: 110px; text-align: right; }
+.yrow .warn { margin: 0; }
+.bkcard { border: 1px solid var(--line); background: var(--surface); border-radius: 14px; padding: 14px; margin: 0 0 14px; display: grid; gap: 10px; }
+.bkcard b { display: block; } .bkcard span { color: var(--muted); font-size: 14px; }
 .modesw { margin: 0 0 14px; grid-template-columns: 1fr 1fr; }
 .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
 
@@ -202,7 +215,8 @@ dl.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
 .l17card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
 .l17card .top b { font: 700 18px var(--font-display); text-transform: uppercase; letter-spacing: .04em; }
 .l17card .top span { font: 600 18px var(--font-display); font-variant-numeric: tabular-nums; }
-.bar { height: 10px; border-radius: 99px; background: var(--soft); overflow: hidden; }
+.bar { display: block; height: 10px; border-radius: 99px; background: var(--soft); overflow: hidden; }
+.bar.over i { background: var(--danger); }
 .bar i { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
 .steps { display: grid; gap: 2px; font-size: 14px; color: var(--muted); }
 .steps .ok { color: var(--accent); font-weight: 600; }
@@ -262,6 +276,7 @@ fieldset.box legend { font: 600 13px var(--font-body); text-transform: uppercase
   <section class="summary" id="summary"></section>
   <section id="l17card" hidden></section>
   <section class="control" id="control"></section>
+  <section id="bkcard" hidden></section>
   <section id="log"></section>
   <section class="tools">
     <button class="btn" id="exportBtn">Export &amp; PDF</button>
@@ -914,10 +929,31 @@ function routeLabel(t) {
 
 /* ---------- rendering ---------- */
 function render() {
-  renderMode(); renderSummary(); renderL17(); renderControl(); renderLog();
+  renderMode(); renderSummary(); renderL17(); renderControl(); renderBackup(); renderLog();
   const v = curVehicle();
   $('#vehicle').innerHTML = `<button class="vehbtn" id="vehBtn" aria-label="Fahrzeug wechseln">${esc(vehLabel(v) || 'Fahrzeug wählen')} <span aria-hidden="true">▾</span></button>`;
   $('#vehBtn').onclick = openVehicleSwitch;
+}
+/* backup reminder: data lives only on this phone */
+const BACKUP_DAYS = { month: 30, week: 7 };
+function backupDue() {
+  const every = BACKUP_DAYS[S.settings.backupRemind || 'month'];
+  if (!every || S.active || !S.trips.length) return null;
+  const now = Date.now(), last = S.settings.lastBackup || 0;
+  if ((S.settings.backupSnooze || 0) > now) return null;
+  const changed = S.trips.some(t => Math.max(t.updated || 0, t.end?.t || t.start.t) > last);
+  if (!changed) return null;
+  if (!last) { const first = Math.min(...S.trips.map(t => t.start.t)); return now - first > 3 * 864e5 || S.trips.length >= 5 ? { last: 0 } : null; }
+  return now - last > every * 864e5 ? { last, days: Math.floor((now - last) / 864e5) } : null;
+}
+function renderBackup() {
+  const el = $('#bkcard'), due = backupDue();
+  if (!due) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `<div class="bkcard"><div><b>Zeit für eine Sicherung</b><span>${due.last ? `Letzte Sicherung vor ${due.days} Tagen.` : 'Du hast noch keine Sicherung.'} Deine Fahrten sind nur auf diesem iPhone gespeichert.</span></div>
+    <div class="actions"><button class="btn primary small" id="bkNow">Jetzt sichern</button><button class="btn small" id="bkLater">Später</button></div></div>`;
+  $('#bkNow').onclick = openBackup;
+  $('#bkLater').onclick = async () => { S.settings.backupSnooze = Date.now() + 3 * 864e5; await store.set('settings', S.settings); renderBackup(); };
 }
 function renderMode() {
   const el = $('#modeSw'), m = appMode();
@@ -981,7 +1017,9 @@ function renderSummary() {
   $('#summary').innerHTML = `
     <div class="yearsw"><button id="yPrev" aria-label="Vorjahr">‹</button><span>${S.year}</span><button id="yNext" aria-label="Folgejahr">›</button></div>
     <div class="stat"><span class="lbl">Dienstliche km</span><span class="val">${fmtKm(km)}</span></div>
-    <div class="stat"><span class="lbl">Kilometergeld</span><span class="val">${fmtEur(money)}</span>${km > KM_LIMIT ? `<span class="warn">Über 30.000 km, Rest nicht absetzbar</span>` : ''}</div>`;
+    <div class="stat"><span class="lbl">Kilometergeld</span><span class="val">${fmtEur(money)}</span></div>
+    <button class="yearbar" id="yearBtn"><span class="bar${km > KM_LIMIT ? ' over' : ''}"><i style="width:${Math.min(100, km / KM_LIMIT * 100)}%"></i></span><span class="yl"><span${km > KM_LIMIT ? ' class="warn"' : ''}>${fmtInt(Math.round(km))} von ${fmtInt(KM_LIMIT)} km${km > KM_LIMIT ? ', Rest nicht absetzbar' : ''}</span><span>Jahresübersicht ›</span></span></button>`;
+  $('#yearBtn').onclick = openYearOverview;
   $('#yPrev').onclick = () => { S.year--; render(); };
   $('#yNext').onclick = () => { S.year++; render(); };
 }
@@ -1385,14 +1423,14 @@ function yearTrips(y, opts = {}) {
     && (opts.kind === 'l17' ? t.type === 'l17' : t.type !== 'l17')
     && (!opts.vehicleId || t.vehicleId === opts.vehicleId)).sort((a, b) => a.start.t - b.start.t);
 }
-async function deliverFile(name, blob) {
+async function deliverFile(name, blob, onDone = () => {}) {
   const file = new File([blob], name, { type: blob.type });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: name }); return; } catch (e) {
+    try { await navigator.share({ files: [file], title: name }); onDone(); return; } catch (e) {
       if (e.name === 'AbortError') return;
       if (e.name === 'NotAllowedError') {
         openSheet(`<div class="sheet-head"><h3>Fertig</h3><button class="btn small" data-close>Schließen</button></div><p class="hint">${esc(name)} ist erstellt.</p><button class="btn primary" id="shareNow">Teilen oder sichern</button>`, sh => {
-          sh.querySelector('#shareNow').onclick = () => navigator.share({ files: [file], title: name }).then(closeSheet).catch(() => {});
+          sh.querySelector('#shareNow').onclick = () => navigator.share({ files: [file], title: name }).then(() => { closeSheet(); onDone(); }).catch(() => {});
         });
         return;
       }
@@ -1401,6 +1439,7 @@ async function deliverFile(name, blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
+  onDone();
 }
 const csvQ = v => { const x = String(v ?? ''); return /[";\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x; };
 const csvDec = n => n == null ? '' : String(round1(n)).replace('.', ',');
@@ -1480,6 +1519,40 @@ async function makePdf(l17) {
   if (last && last !== ps[0]) { const ls = doc.splitTextToSize(clean(last.textContent), W - 2 * M); let fy = doc.lastAutoTable.finalY + 6; if (fy > doc.internal.pageSize.getHeight() - 15) { doc.addPage(); fy = 15; } doc.text(ls, M, fy); }
   return doc.output('blob');
 }
+/* year overview for the tax return: business km, Kilometergeld and the 30.000 km limit per year */
+function yearStats(y) {
+  const ts = S.trips.filter(t => t.type !== 'l17' && new Date(t.start.t).getFullYear() === y);
+  const biz = ts.filter(t => t.type === 'dienstlich' && !t.draft), km = biz.reduce((a, t) => a + (t.km || 0), 0);
+  const priv = ts.filter(t => t.type === 'privat').reduce((a, t) => a + (t.km || 0), 0);
+  const rate = S.settings.rate || 0, money = Math.min(km, KM_LIMIT) * rate, refund = num(String(S.settings.refunds?.[y] ?? '')) || 0;
+  return { y, trips: biz.length, km, priv, money, refund, net: Math.max(0, money - refund), drafts: ts.filter(t => t.draft).length, over: Math.max(0, km - KM_LIMIT) };
+}
+function openYearOverview() {
+  const ys = [...new Set([S.year, ...S.trips.filter(t => t.type !== 'l17').map(t => new Date(t.start.t).getFullYear())])].sort((a, b) => b - a);
+  const row = y => { const st = yearStats(y); return `<div class="yrow" data-y="${y}">
+      <div class="yh"><b>${y}</b><span>${st.trips} dienstliche Fahrt${st.trips === 1 ? '' : 'en'}</span></div>
+      <span class="bar${st.over ? ' over' : ''}"><i style="width:${Math.min(100, st.km / KM_LIMIT * 100)}%"></i></span>
+      <dl>
+        <dt>Dienstliche km</dt><dd>${fmtKm(st.km)} km <small>von ${fmtInt(KM_LIMIT)}</small></dd>
+        <dt>Private km</dt><dd>${fmtKm(st.priv)} km</dd>
+        <dt>Kilometergeld</dt><dd>${fmtEur(st.money)}</dd>
+        <dt>Ersatz vom Arbeitgeber</dt><dd><input class="refund" data-y="${y}" inputmode="decimal" placeholder="0,00" value="${st.refund ? String(st.refund).replace('.', ',') : ''}" aria-label="Ersatz vom Arbeitgeber ${y} in Euro"></dd>
+        <dt><b>Als Werbungskosten</b></dt><dd><b class="net">${fmtEur(st.net)}</b></dd>
+      </dl>
+      ${st.over ? `<p class="warn">${fmtKm(st.over)} km über der Grenze von ${fmtInt(KM_LIMIT)} km. Dafür gibt es kein Kilometergeld.</p>` : ''}
+      ${st.drafts ? `<p class="warn">${st.drafts} Fahrt${st.drafts > 1 ? 'en' : ''} ohne Zweck, noch nicht mitgezählt.</p>` : ''}
+    </div>`; };
+  openSheet(`
+    <div class="sheet-head"><h3>Jahresübersicht</h3><button class="btn small" data-close>Schließen</button></div>
+    <p class="hint">Kilometergeld ${fmtEur(S.settings.rate || 0)} pro km, höchstens 30.000 km im Jahr. Den Betrag „Als Werbungskosten“ trägst du in der Arbeitnehmerveranlagung (L1) bei den Reisekosten ein, Kennzahl 721. Was dir der Arbeitgeber schon steuerfrei ersetzt hat, wird abgezogen.</p>
+    <div class="ylist">${ys.map(row).join('')}</div>`, sh => {
+    sh.querySelectorAll('.refund').forEach(inp => inp.oninput = async () => {
+      const y = +inp.dataset.y; S.settings.refunds = { ...(S.settings.refunds || {}), [y]: num(inp.value) || 0 };
+      await store.set('settings', S.settings);
+      sh.querySelector(`.yrow[data-y="${y}"] .net`).textContent = fmtEur(yearStats(y).net);
+    });
+  });
+}
 /* print preview: the same page as the PDF, shown as a sheet of paper scaled to the screen */
 function openPreview(onPdf) {
   document.querySelector('.pv')?.remove();
@@ -1540,6 +1613,7 @@ function openBackup() {
   openSheet(`
     <div class="sheet-head"><h3>Sicherung</h3><button class="btn small" data-close>Schließen</button></div>
     <p class="hint">Deine Fahrten und Tacho-Fotos sind nur auf diesem Handy gespeichert. Speichere regelmäßig eine Sicherung, z.B. in iCloud Drive, damit nichts verloren geht.</p>
+    <p class="hint"><b>${S.settings.lastBackup ? 'Letzte Sicherung: ' + fullDate(S.settings.lastBackup) : 'Noch keine Sicherung gespeichert.'}</b></p>
     <div class="actions">
       <button class="btn primary" id="b_save">Sicherung speichern</button>
       <label class="btn" style="display:grid;place-items:center">Sicherung laden<input type="file" id="b_load" accept=".json,application/json" hidden></label>
@@ -1550,7 +1624,9 @@ function openBackup() {
       const toData = b => new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); });
       for (const t of S.trips) for (const w of ['start', 'end']) { if (!t.photos?.[w]) continue; const b = await store.getPhoto(`${t.id}:${w}`).catch(() => null); if (b) photos[`${t.id}:${w}`] = await toData(b); }
       done();
-      deliverFile(`Fahrtenbuch_Sicherung_${dateVal(Date.now())}.json`, new Blob([JSON.stringify({ app: 'fahrtenbuch', version: 2, exported: Date.now(), settings: S.settings, trips: S.trips, photos })], { type: 'application/json' }));
+      deliverFile(`Fahrtenbuch_Sicherung_${dateVal(Date.now())}.json`, new Blob([JSON.stringify({ app: 'fahrtenbuch', version: 2, exported: Date.now(), settings: S.settings, trips: S.trips, photos })], { type: 'application/json' }), async () => {
+        S.settings.lastBackup = Date.now(); delete S.settings.backupSnooze; await store.set('settings', S.settings); render(); toast('Sicherung gespeichert.');
+      });
     };
     sheet.querySelector('#b_load').onchange = async e => {
       const file = e.target.files[0]; if (!file) return;
@@ -1586,6 +1662,7 @@ function openSettings(focus) {
         <label class="field"><span class="lbl">Standard-Fahrtart</span><select id="s_type">${Object.entries(TYPES).filter(([k]) => k !== 'l17').map(([k, l]) => `<option value="${k}" ${s.defaultType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div>
       <label class="field"><span class="lbl">KM-Stand bei Start und Ende</span><select id="s_odo">${[['ask', 'Jedes Mal fragen'], ['camera', 'Immer Tacho fotografieren'], ['manual', 'Immer selbst eintippen'], ['off', 'Nicht abfragen']].map(([k, l]) => `<option value="${k}" ${odoMode() === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field"><span class="lbl">Erinnerung an Sicherung</span><select id="s_bk">${[['month', 'Monatlich'], ['week', 'Wöchentlich'], ['off', 'Aus']].map(([k, l]) => `<option value="${k}" ${(s.backupRemind || 'month') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <fieldset class="box" id="sec_l17"><legend>L17-Führerschein</legend>
         <label class="check"><input type="checkbox" id="l_on" ${c.on ? 'checked' : ''}><span>L17-Übungsfahrten dokumentieren</span></label>
         <div id="l17fields" style="display:grid;gap:12px" ${c.on ? '' : 'hidden'}>
@@ -1626,7 +1703,7 @@ function openSettings(focus) {
       vs.forEach(v => { if (!v.name) v.name = v.plate || 'Auto'; });
       const q = id => sheet.querySelector('#' + id);
       S.settings = { ...S.settings, name: q('s_name').value.trim(), vehicles: vs, vehicleId: vs.some(v => v.id === S.settings.vehicleId) ? S.settings.vehicleId : vs[0].id,
-        rate: num(q('s_rate').value) ?? 0.5, defaultType: q('s_type').value, odoMode: q('s_odo').value,
+        rate: num(q('s_rate').value) ?? 0.5, defaultType: q('s_type').value, odoMode: q('s_odo').value, backupRemind: q('s_bk').value,
         mode: q('l_on').checked && !c.on ? 'l17' : S.settings.mode,
         l17: { on: q('l_on').checked, learner: q('l_learner').value.trim(), birth: q('l_birth').value, companions: q('l_comp').value.trim(), s1: q('l_s1').value, s2: q('l_s2').value } };
       await store.set('settings', S.settings); closeSheet(); render(); toast('Einstellungen gespeichert.');
@@ -1635,7 +1712,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-20.11';
+const APP_VERSION = '2026-10-20.12';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
