@@ -120,6 +120,7 @@ header.top .sub { color: var(--muted); font-size: 14px; }
 .row3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .seg button { border: 0; background: var(--bg); padding: 10px; min-height: 44px; font-weight: 600; }
+.modesw { margin: 0 0 14px; grid-template-columns: 1fr 1fr; }
 .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
 
 .month h2 { font: 600 15px var(--font-display); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); display: flex; justify-content: space-between; margin: 8px 2px 8px; }
@@ -257,6 +258,7 @@ fieldset.box legend { font: 600 13px var(--font-body); text-transform: uppercase
     </button>
   </header>
 
+  <div id="modeSw" hidden></div>
   <section class="summary" id="summary"></section>
   <section id="l17card" hidden></section>
   <section class="control" id="control"></section>
@@ -871,8 +873,14 @@ const vehById = id => vehicles().find(v => v.id === id) || null;
 const vehLabel = v => v ? [v.name, v.plate].filter(Boolean).join(' · ') : '';
 const l17On = () => !!(S.settings.l17 && S.settings.l17.on);
 const companions = () => String(S.settings.l17?.companions || '').split(',').map(x => x.trim()).filter(Boolean);
+// app mode: 'tax' (Fahrtenbuch for the tax return) or 'l17' (L17 protocol); only one is shown at a time
+const appMode = () => l17On() && S.settings.mode === 'l17' ? 'l17' : 'tax';
+const taxType = () => S.settings.defaultType === 'privat' ? 'privat' : 'dienstlich';
+const modeType = () => appMode() === 'l17' ? 'l17' : taxType();
+const inMode = t => appMode() === 'l17' ? t.type === 'l17' : t.type !== 'l17';
 function segHtml(cur) {
-  const ts = l17On() || cur === 'l17' ? ['dienstlich', 'privat', 'l17'] : ['dienstlich', 'privat'];
+  if (appMode() === 'l17' && cur === 'l17') return '';
+  const ts = cur === 'l17' ? ['dienstlich', 'privat', 'l17'] : ['dienstlich', 'privat'];
   return `<div class="seg" style="grid-template-columns:repeat(${ts.length},1fr)" role="group" aria-label="Fahrtart">${ts.map(k => `<button type="button" data-type="${k}" aria-pressed="${cur === k}">${k === 'l17' ? 'L17' : TYPES[k]}</button>`).join('')}</div>`;
 }
 // Sun height (degrees) for day / twilight / dark, for the L17 protocol
@@ -906,15 +914,28 @@ function routeLabel(t) {
 
 /* ---------- rendering ---------- */
 function render() {
-  renderSummary(); renderL17(); renderControl(); renderLog();
+  renderMode(); renderSummary(); renderL17(); renderControl(); renderLog();
   const v = curVehicle();
   $('#vehicle').innerHTML = `<button class="vehbtn" id="vehBtn" aria-label="Fahrzeug wechseln">${esc(vehLabel(v) || 'Fahrzeug wählen')} <span aria-hidden="true">▾</span></button>`;
   $('#vehBtn').onclick = openVehicleSwitch;
 }
+function renderMode() {
+  const el = $('#modeSw'), m = appMode();
+  document.querySelector('header.top h1').textContent = m === 'l17' ? 'L17-Protokoll' : 'Fahrtenbuch';
+  if (!l17On()) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `<div class="seg modesw" role="group" aria-label="Modus"><button type="button" data-m="tax" aria-pressed="${m === 'tax'}">Fahrtenbuch Steuer</button><button type="button" data-m="l17" aria-pressed="${m === 'l17'}">L17-Protokoll</button></div>`;
+  el.querySelectorAll('[data-m]').forEach(b => b.onclick = async () => {
+    if (b.dataset.m === m) return;
+    S.settings.mode = b.dataset.m; await store.set('settings', S.settings);
+    if (S.active) { S.active.type = modeType(); saveActive(); }
+    render();
+  });
+}
 function renderL17() {
   const el = $('#l17card');
+  if (appMode() !== 'l17') { el.hidden = true; return; }
   const st = l17Stats();
-  if (!l17On() && !st.trips.length) { el.hidden = true; return; }
   el.hidden = false;
   const c = S.settings.l17 || {}, k = n => fmtInt(Math.floor(n));
   let next;
@@ -944,6 +965,16 @@ function openVehicleSwitch() {
 }
 
 function renderSummary() {
+  if (appMode() === 'l17') {
+    const ts = S.trips.filter(t => !t.draft && t.type === 'l17' && new Date(t.start.t).getFullYear() === S.year);
+    $('#summary').innerHTML = `
+    <div class="yearsw"><button id="yPrev" aria-label="Vorjahr">‹</button><span>${S.year}</span><button id="yNext" aria-label="Folgejahr">›</button></div>
+    <div class="stat"><span class="lbl">L17-km</span><span class="val">${fmtKm(ts.reduce((s, t) => s + (t.km || 0), 0))}</span></div>
+    <div class="stat"><span class="lbl">Übungsfahrten</span><span class="val">${ts.length}</span></div>`;
+    $('#yPrev').onclick = () => { S.year--; render(); };
+    $('#yNext').onclick = () => { S.year++; render(); };
+    return;
+  }
   const ts = S.trips.filter(t => !t.draft && t.type === 'dienstlich' && new Date(t.start.t).getFullYear() === S.year);
   const km = ts.reduce((s, t) => s + (t.km || 0), 0);
   const money = Math.min(km, KM_LIMIT) * (S.settings.rate || 0);
@@ -1009,7 +1040,7 @@ function updateLive() {
 }
 
 function renderLog() {
-  const ts = S.trips.filter(t => new Date(t.start.t).getFullYear() === S.year).sort(sortByTime);
+  const ts = S.trips.filter(t => inMode(t) && new Date(t.start.t).getFullYear() === S.year).sort(sortByTime);
   if (!ts.length) {
     $('#log').innerHTML = `<div class="empty">Noch keine Fahrten in ${S.year}.<br>Tippe auf <b>Fahrt starten</b>, wenn du losfährst.</div>`;
     return;
@@ -1021,10 +1052,10 @@ function renderLog() {
     const title = new Date(list[0].start.t).toLocaleDateString('de-AT', { month: 'long', year: 'numeric' });
     const km = list.filter(t => t.type === 'dienstlich' && !t.draft).reduce((s, t) => s + (t.km || 0), 0);
     const kl = list.filter(t => t.type === 'l17' && !t.draft).reduce((s, t) => s + (t.km || 0), 0);
-    html += `<div class="month"><h2><span>${title}</span><span>${fmtKm(km)} km dienstlich${kl ? ' · ' + fmtKm(kl) + ' L17' : ''}</span></h2><div class="list">` +
+    html += `<div class="month"><h2><span>${title}</span><span>${appMode() === 'l17' ? fmtKm(kl) + ' km' : fmtKm(km) + ' km dienstlich'}</span></h2><div class="list">` +
       list.map(t => `<button class="trip" data-id="${t.id}">
         <span class="d">${dayLabel(t.start.t)}<small>${timeVal(t.start.t)}${t.end ? '–' + timeVal(t.end.t) : ''}</small></span>
-        <span class="r"><b>${esc(routeLabel(t))}</b><span>${t.draft ? '<span class="pill draft">Zweck fehlt</span> ' : ''}${t.type === 'privat' ? '<span class="pill">Privat</span> ' : ''}${t.type === 'l17' ? '<span class="pill">L17</span> ' : ''}${esc([
+        <span class="r"><b>${esc(routeLabel(t))}</b><span>${t.draft ? '<span class="pill draft">Zweck fehlt</span> ' : ''}${t.type === 'privat' ? '<span class="pill">Privat</span> ' : ''}${esc([
           vehicles().length > 1 && t.vehicleId ? vehById(t.vehicleId)?.name : '',
           t.type === 'l17' && t.companion ? 'mit ' + t.companion : '',
           t.purpose, t.client,
@@ -1091,7 +1122,7 @@ function beginTrip() {
   const t0 = Date.now(), veh = curVehicle(), last = lastTrip(veh?.id), id = uid();
   navigator.storage?.persist?.().catch(() => {});
   S.active = {
-    id, vehicleId: veh?.id || null, type: S.settings.defaultType || 'dienstlich', purpose: '', odoStart: last?.odoEnd ?? null,
+    id, vehicleId: veh?.id || null, type: modeType(), purpose: '', odoStart: last?.odoEnd ?? null,
     start: { t: t0, lat: null, lng: null, acc: null, addr: '' }, track: [],
   };
   saveActive(); render(); startWatch();
@@ -1160,7 +1191,7 @@ async function stopTripGps(choice) {
 function newManualTrip() {
   const now = Date.now(), veh = curVehicle(), last = lastTrip(veh?.id);
   return {
-    id: uid(), vehicleId: veh?.id || null, type: S.settings.defaultType || 'dienstlich', purpose: '', client: '', note: '', companion: companions()[0] || '', weather: '', light: '',
+    id: uid(), vehicleId: veh?.id || null, type: modeType(), purpose: '', client: '', note: '', companion: companions()[0] || '', weather: '', light: '',
     start: { t: now - 3600e3, lat: null, lng: null, addr: '' }, end: { t: now, lat: null, lng: null, addr: '' },
     track: [], routeLine: null, kmGps: null, kmRoute: null, kmSource: 'Manuell',
     km: null, odoStart: last?.odoEnd ?? null, odoEnd: null,
@@ -1219,7 +1250,12 @@ function openTripForm(trip, { isNew }) {
       <div class="confirm" id="discardConfirm" hidden><span>Diese Fahrt wirklich verwerfen?</span><div class="actions"><button class="btn danger" type="button" id="discardYes">Ja, verwerfen</button><button class="btn" type="button" id="discardNo">Behalten</button></div></div>
     </form>`, sheet => {
     const f = id => sheet.querySelector('#f_' + id);
-    const typeUi = () => { sheet.querySelector('#l17box').hidden = type !== 'l17'; sheet.querySelector('#w_client').hidden = type === 'l17'; f('purpose').placeholder = type === 'l17' ? 'z.B. Übungsfahrt Freiland, Autobahn' : 'z.B. Kundentermin, Baustelle, Schulung'; };
+    const typeUi = () => {
+      const l = type === 'l17';
+      sheet.querySelector('#l17box').hidden = !l; sheet.querySelector('#w_client').hidden = l;
+      sheet.querySelector('#w_purpose .lbl').textContent = l ? 'Übungsinhalt (optional)' : 'Zweck der Fahrt';
+      f('purpose').placeholder = l ? 'z.B. Freiland, Autobahn, Einparken' : 'z.B. Kundentermin, Baustelle, Schulung';
+    };
     sheet.querySelectorAll('.seg button').forEach(b => b.onclick = () => { type = b.dataset.type; sheet.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', x === b)); typeUi(); });
     typeUi();
     const syncFromKm = () => { const s = num(f('odoStart').value), k = num(f('km').value); if (s != null && k != null) f('odoEnd').value = Math.round(s + k); };
@@ -1461,11 +1497,10 @@ function openPreview(onPdf) {
   pv.querySelector('#pvPdf').onclick = onPdf;
 }
 function openExport() {
-  const hasL17 = l17On() || S.trips.some(t => t.type === 'l17');
+  const hasL17 = appMode() === 'l17';
   const ys = yearsAvailable();
   openSheet(`
-    <div class="sheet-head"><h3>Export</h3><button class="btn small" data-close>Schließen</button></div>
-    ${hasL17 ? `<label class="field"><span class="lbl">Was</span><select id="x_kind"><option value="work">Fahrtenbuch (Arbeit)</option><option value="l17">L17-Fahrtenprotokoll</option></select></label>` : ''}
+    <div class="sheet-head"><h3>${hasL17 ? 'L17-Protokoll exportieren' : 'Export'}</h3><button class="btn small" data-close>Schließen</button></div>
     <div class="row2">
       <label class="field"><span class="lbl">Jahr</span><select id="x_year">${hasL17 ? '<option value="0">Alle Jahre</option>' : ''}${ys.map(y => `<option value="${y}" ${y === S.year ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
       <label class="field"><span class="lbl">Fahrzeug</span><select id="x_veh"><option value="">Alle Fahrzeuge</option>${vehicles().map(v => `<option value="${v.id}">${esc(vehLabel(v))}</option>`).join('')}</select></label>
@@ -1477,15 +1512,15 @@ function openExport() {
       <button class="btn" id="x_pdf">PDF erstellen</button>
     </div>
     <p class="hint">Das PDF kannst du danach in Dateien sichern, drucken oder per Mail verschicken.</p>`, sheet => {
-    const sel = sheet.querySelector('#x_year'), veh = sheet.querySelector('#x_veh'), kind = sheet.querySelector('#x_kind');
-    const k = () => kind ? kind.value : 'work';
+    const sel = sheet.querySelector('#x_year'), veh = sheet.querySelector('#x_veh');
+    const k = () => hasL17 ? 'l17' : 'work';
     const info = () => {
       const y = +sel.value, vid = veh.value;
       if (k() === 'l17') { const rs = l17Rows(y, vid).filter(r => r.t); const km = rs.reduce((a, r) => a + (r.t.km || 0), 0); sheet.querySelector('#x_info').textContent = `${rs.length} L17-Fahrten, ${fmtKm(km)} km.`; return; }
       const ts = yearTrips(y, { vehicleId: vid }), dk = ts.filter(t => t.type === 'dienstlich').reduce((a, t) => a + (t.km || 0), 0);
       sheet.querySelector('#x_info').textContent = `${ts.length} Fahrten, ${fmtKm(dk)} km dienstlich, Kilometergeld ${fmtEur(Math.min(dk, KM_LIMIT) * (S.settings.rate || 0))}.`;
     };
-    sel.onchange = info; veh.onchange = info; if (kind) kind.onchange = info; info();
+    sel.onchange = info; veh.onchange = info; info();
     sheet.querySelector('#x_csv').onclick = () => k() === 'l17'
       ? deliverFile(`L17_Fahrtenprotokoll${+sel.value ? '_' + sel.value : ''}.csv`, new Blob([csvL17(+sel.value, veh.value)], { type: 'text/csv;charset=utf-8' }))
       : deliverFile(`Fahrtenbuch_${sel.value || 'alle'}.csv`, new Blob([csvFor(+sel.value, veh.value)], { type: 'text/csv;charset=utf-8' }));
@@ -1548,11 +1583,13 @@ function openSettings(focus) {
       </fieldset>
       <div class="row2">
         <label class="field"><span class="lbl">Kilometergeld € pro km</span><input id="s_rate" inputmode="decimal" value="${String(s.rate).replace('.', ',')}"></label>
-        <label class="field"><span class="lbl">Standard-Fahrtart</span><select id="s_type">${Object.entries(TYPES).map(([k, l]) => `<option value="${k}" ${s.defaultType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label class="field"><span class="lbl">Standard-Fahrtart</span><select id="s_type">${Object.entries(TYPES).filter(([k]) => k !== 'l17').map(([k, l]) => `<option value="${k}" ${s.defaultType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div>
       <label class="field"><span class="lbl">KM-Stand bei Start und Ende</span><select id="s_odo">${[['ask', 'Jedes Mal fragen'], ['camera', 'Immer Tacho fotografieren'], ['manual', 'Immer selbst eintippen'], ['off', 'Nicht abfragen']].map(([k, l]) => `<option value="${k}" ${odoMode() === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <fieldset class="box" id="sec_l17"><legend>L17-Führerschein</legend>
         <label class="check"><input type="checkbox" id="l_on" ${c.on ? 'checked' : ''}><span>L17-Übungsfahrten dokumentieren</span></label>
+        <div id="l17fields" style="display:grid;gap:12px" ${c.on ? '' : 'hidden'}>
+        <p class="hint" style="margin:0">Oben in der App wählst du dann zwischen „Fahrtenbuch Steuer“ und „L17-Protokoll“. Es erscheinen jeweils nur die Eingaben, die dafür nötig sind.</p>
         <div class="row2">
           <label class="field"><span class="lbl">Bewerber/in</span><input id="l_learner" value="${esc(c.learner || '')}" placeholder="Name"></label>
           <label class="field"><span class="lbl">Geburtsdatum</span><input id="l_birth" type="date" value="${esc(c.birth || '')}"></label>
@@ -1563,6 +1600,7 @@ function openSettings(focus) {
           <label class="field"><span class="lbl">2. begleitende Schulung am</span><input id="l_s2" type="date" value="${esc(c.s2 || '')}"></label>
         </div>
         <p class="hint" style="margin:0">Laut den Protokollvorlagen der Fahrschulen: mindestens 1.000 km vor der 1. und 1.000 km zwischen der 1. und 2. begleitenden Schulung, insgesamt mindestens 3.000 km. Das Protokoll ausdrucken und jede Fahrt von Begleitperson und Bewerber/in unterschreiben lassen. Im Zweifel bei der Fahrschule nachfragen.</p>
+        </div>
       </fieldset>
       <p class="hint">App-Version ${APP_VERSION}. Neue Versionen lädt die App automatisch.</p>
       <p class="hint">Amtliches Kilometergeld für PKW seit 2025: 0,50 € pro km, höchstens 30.000 km im Jahr. Fahrten zwischen Wohnung und Arbeitsplatz gehören nicht ins Fahrtenbuch, dafür gibt es die Pendlerpauschale.</p>
@@ -1579,6 +1617,7 @@ function openSettings(focus) {
     };
     drawV();
     sheet.querySelector('#vAdd').onclick = () => { readRows(); vs.push({ id: uid(), name: '', plate: '' }); drawV(); vlist.querySelector('.vrow:last-child input').focus(); };
+    sheet.querySelector('#l_on').onchange = e => { sheet.querySelector('#l17fields').hidden = !e.target.checked; };
     if (focus) setTimeout(() => sheet.querySelector('#sec_' + focus)?.scrollIntoView({ block: 'start' }), 50);
     sheet.querySelector('#sf').onsubmit = async e => {
       e.preventDefault(); readRows();
@@ -1588,6 +1627,7 @@ function openSettings(focus) {
       const q = id => sheet.querySelector('#' + id);
       S.settings = { ...S.settings, name: q('s_name').value.trim(), vehicles: vs, vehicleId: vs.some(v => v.id === S.settings.vehicleId) ? S.settings.vehicleId : vs[0].id,
         rate: num(q('s_rate').value) ?? 0.5, defaultType: q('s_type').value, odoMode: q('s_odo').value,
+        mode: q('l_on').checked && !c.on ? 'l17' : S.settings.mode,
         l17: { on: q('l_on').checked, learner: q('l_learner').value.trim(), birth: q('l_birth').value, companions: q('l_comp').value.trim(), s1: q('l_s1').value, s2: q('l_s2').value } };
       await store.set('settings', S.settings); closeSheet(); render(); toast('Einstellungen gespeichert.');
     };
@@ -1595,7 +1635,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-20.10';
+const APP_VERSION = '2026-10-20.11';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
