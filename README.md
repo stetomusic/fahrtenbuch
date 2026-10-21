@@ -18,6 +18,7 @@ In den **Einstellungen** „L17-Übungsfahrten dokumentieren“ einschalten, Nam
 Unter den Jahreszahlen zeigt ein Balken, wie viele der 30.000 km im Jahr schon erreicht sind. „Jahresübersicht“ zeigt pro Jahr dienstliche und private km, das Kilometergeld und den Betrag für die Arbeitnehmerveranlagung (L1, Reisekosten, Kennzahl 721). Was der Arbeitgeber schon steuerfrei ersetzt hat, trägst du dort ein, es wird abgezogen.
 
 ## Wichtig
+- Automatische Sicherung in Dropbox: Unter **Sicherung** einmalig mit Dropbox verbinden (Anleitung steht dort). Danach sichert die App nach jeder Änderung von selbst in den Dropbox-Ordner Apps/Fahrtenbuch, solange sie geöffnet ist. „Aus Dropbox laden“ holt alles zurück, z.B. auf einem neuen iPhone.
 - Die Daten liegen nur auf deinem iPhone. Unter **Sicherung** regelmäßig eine Sicherung in iCloud Drive speichern. Die App erinnert dich monatlich daran, wenn es neue Fahrten seit der letzten Sicherung gibt (in den Einstellungen auf wöchentlich oder aus stellbar).
 - Wird die App während der Fahrt geschlossen, berechnet sie die km am Ende über die Route (Start → Ziel). Umwege fehlen dann.
 - Die Tacho-Fotos werden mit der Fahrt gespeichert und in der Sicherung mitgesichert. In den Einstellungen kannst du festlegen, ob die App jedes Mal fragt, immer die Kamera öffnet, immer eintippen lässt oder gar nicht nach dem KM-Stand fragt.

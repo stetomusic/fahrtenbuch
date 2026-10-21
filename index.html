@@ -133,6 +133,9 @@ header.top .sub { color: var(--muted); font-size: 14px; }
 .yrow dd small { color: var(--muted); }
 .yrow .refund { width: 110px; text-align: right; }
 .yrow .warn { margin: 0; }
+.box { border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.steps-list { margin: 6px 0 0; padding-left: 20px; display: grid; gap: 4px; }
+details summary { cursor: pointer; }
 .bkcard { border: 1px solid var(--line); background: var(--surface); border-radius: 14px; padding: 14px; margin: 0 0 14px; display: grid; gap: 10px; }
 .bkcard b { display: block; } .bkcard span { color: var(--muted); font-size: 14px; }
 .modesw { margin: 0 0 14px; grid-template-columns: 1fr 1fr; }
@@ -364,7 +367,7 @@ const store = {
   get(k) { return this.run('meta', 'readonly', s => s.get(k)); },
   set(k, v) { return this.run('meta', 'readwrite', s => { s.put(v, k); }); },
   getPhoto(k) { return this.run('photos', 'readonly', s => s.get(k)); },
-  putPhoto(k, blob) { return this.run('photos', 'readwrite', s => { s.put(blob, k); }); },
+  putPhoto(k, blob) { const d = S.settings.dropbox; if (d?.photosSent?.includes(k)) d.photosSent = d.photosSent.filter(x => x !== k); return this.run('photos', 'readwrite', s => { s.put(blob, k); }); },
   delPhotos(id) { return this.run('photos', 'readwrite', s => { s.delete(id + ':start'); s.delete(id + ':end'); }); },
 };
 
@@ -1069,7 +1072,7 @@ function routeLabel(t) {
 
 /* ---------- rendering ---------- */
 function render() {
-  renderMode(); renderSummary(); renderL17(); renderControl(); renderBackup(); renderLog();
+  renderMode(); renderSummary(); renderL17(); renderControl(); renderBackup(); renderLog(); autoDropbox();
   const v = curVehicle();
   $('#vehicle').innerHTML = `<button class="vehbtn" id="vehBtn" aria-label="Fahrzeug wechseln">${esc(vehLabel(v) || 'Fahrzeug wählen')} <span aria-hidden="true">▾</span></button>`;
   $('#vehBtn').onclick = openVehicleSwitch;
@@ -1077,6 +1080,7 @@ function render() {
 /* backup reminder: data lives only on this phone */
 const BACKUP_DAYS = { month: 30, week: 7 };
 function backupDue() {
+  if (dbxOn() && !S.settings.dropbox.error) return null;
   const every = BACKUP_DAYS[S.settings.backupRemind || 'month'];
   if (!every || S.active || !S.trips.length) return null;
   const now = Date.now(), last = S.settings.lastBackup || 0;
@@ -1784,6 +1788,136 @@ function openExport() {
     sheet.querySelector('#x_prev').onclick = () => { const { l17, y } = build(); openPreview(l17, pdfName(l17, y)); };
   });
 }
+async function mergeBackup(data, photoFetch) {
+  if (!data || data.app !== 'fahrtenbuch' || !Array.isArray(data.trips)) return null;
+  let added = 0, updated = 0;
+  for (const t of data.trips) {
+    const cur = S.trips.find(x => x.id === t.id);
+    if (!cur) { S.trips.push(t); await store.putTrip(t); added++; }
+    else if ((t.updated || 0) > (cur.updated || 0)) { Object.assign(cur, t); await store.putTrip(cur); updated++; }
+  }
+  for (const [k, u] of Object.entries(data.photos || {})) { if (!(await store.getPhoto(k).catch(() => null))) await store.putPhoto(k, await (await fetch(u)).blob()); }
+  if (photoFetch) for (const k of data.photoFiles || []) { if (!(await store.getPhoto(k).catch(() => null))) { const b = await photoFetch(k).catch(() => null); if (b) await store.putPhoto(k, b); } }
+  if (data.settings && !S.settings.name && !S.settings.vehicle) { const { dropbox, ...rest } = data.settings; S.settings = { ...S.settings, ...rest }; await store.set('settings', S.settings); }
+  return { added, updated };
+}
+
+/* ---------- Dropbox: automatic backup into the app folder Apps/Fahrtenbuch of the user's own Dropbox ---------- */
+// Login uses the code flow without redirect (the user copies a code), because a home-screen app cannot receive a redirect.
+const dbxOn = () => !!(S.settings.dropbox?.refresh && S.settings.dropbox?.appKey);
+let dbxToken = null, dbxBusy = false, dbxTimer = null;
+const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function dbxVerifier() { const a = new Uint8Array(48); crypto.getRandomValues(a); return b64url(a); }
+async function dbxAuthUrl(appKey, verifier) {
+  const ch = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+  return `https://www.dropbox.com/oauth2/authorize?${new URLSearchParams({ client_id: appKey, response_type: 'code', code_challenge: ch, code_challenge_method: 'S256', token_access_type: 'offline' })}`;
+}
+async function dbxConnect(appKey, verifier, code) {
+  const r = await fetch('https://api.dropboxapi.com/oauth2/token', { method: 'POST', body: new URLSearchParams({ grant_type: 'authorization_code', code: code.trim(), code_verifier: verifier, client_id: appKey }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.refresh_token) throw new Error(j.error_description || j.error || 'Anmeldung fehlgeschlagen');
+  dbxToken = { access: j.access_token, exp: Date.now() + (j.expires_in || 14400) * 1000 };
+  S.settings.dropbox = { appKey, refresh: j.refresh_token, photosSent: [], last: 0, error: '' };
+  await store.set('settings', S.settings);
+}
+async function dbxAccess() {
+  if (dbxToken && dbxToken.exp > Date.now() + 60e3) return dbxToken.access;
+  const d = S.settings.dropbox;
+  const r = await fetch('https://api.dropboxapi.com/oauth2/token', { method: 'POST', body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: d.refresh, client_id: d.appKey }) });
+  if (!r.ok) throw new Error(r.status === 400 ? 'Dropbox-Anmeldung abgelaufen, bitte neu verbinden' : 'Dropbox nicht erreichbar');
+  const j = await r.json(); dbxToken = { access: j.access_token, exp: Date.now() + j.expires_in * 1000 }; return dbxToken.access;
+}
+async function dbxUpload(path, blob) {
+  const r = await fetch('https://content.dropboxapi.com/2/files/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + await dbxAccess(), 'Dropbox-API-Arg': JSON.stringify({ path, mode: 'overwrite', mute: true }), 'Content-Type': 'application/octet-stream' }, body: blob });
+  if (!r.ok) throw new Error('Hochladen fehlgeschlagen (' + r.status + ')');
+}
+async function dbxDownload(path) {
+  const r = await fetch('https://content.dropboxapi.com/2/files/download', { method: 'POST', headers: { Authorization: 'Bearer ' + await dbxAccess(), 'Dropbox-API-Arg': JSON.stringify({ path }) } });
+  if (r.status === 409) return null;
+  if (!r.ok) throw new Error('Laden fehlgeschlagen (' + r.status + ')');
+  return r.blob();
+}
+const dbxChanged = () => S.trips.some(t => Math.max(t.updated || 0, t.end?.t || t.start.t) > (S.settings.dropbox?.last || 0));
+async function dbxBackup({ quiet = false } = {}) {
+  if (!dbxOn() || dbxBusy || !navigator.onLine) return false;
+  dbxBusy = true;
+  try {
+    const sent = new Set(S.settings.dropbox.photosSent || []);
+    for (const t of S.trips) for (const w of ['start', 'end']) {
+      const k = `${t.id}:${w}`; if (!t.photos?.[w] || sent.has(k)) continue;
+      const b = await store.getPhoto(k).catch(() => null); if (!b) continue;
+      await dbxUpload(`/Fotos/${t.id}_${w}.jpg`, b); sent.add(k);
+    }
+    const { dropbox, ...settings } = S.settings;
+    const body = new Blob([JSON.stringify({ app: 'fahrtenbuch', version: 2, exported: Date.now(), settings, trips: S.trips, photos: {}, photoFiles: [...sent] })], { type: 'application/json' });
+    await dbxUpload('/Fahrtenbuch_Sicherung.json', body);
+    const m = new Date(); await dbxUpload(`/Archiv/Fahrtenbuch_${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, '0')}.json`, body);
+    S.settings.dropbox = { ...S.settings.dropbox, photosSent: [...sent], last: Date.now(), error: '' };
+    S.settings.lastBackup = Date.now(); delete S.settings.backupSnooze;
+    await store.set('settings', S.settings);
+    if (!quiet) toast('In Dropbox gesichert.');
+    renderBackup(); return true;
+  } catch (e) {
+    S.settings.dropbox = { ...S.settings.dropbox, error: e.message || String(e) }; await store.set('settings', S.settings).catch(() => {});
+    if (!quiet) toast('Dropbox-Sicherung fehlgeschlagen: ' + (e.message || e)); renderBackup(); return false;
+  } finally { dbxBusy = false; }
+}
+// automatic: a few seconds after something changed, and when the app comes back
+function autoDropbox() { if (!dbxOn() || !dbxChanged()) return; clearTimeout(dbxTimer); dbxTimer = setTimeout(() => dbxBackup({ quiet: true }), 4000); }
+function bindDropbox(sheet) {
+  const box = sheet.querySelector('#dbx'); if (!box) return;
+  const draw = () => {
+    const d = S.settings.dropbox || {};
+    if (dbxOn()) {
+      box.innerHTML = `<p class="hint" style="margin:0"><b>Mit Dropbox verbunden.</b> Die App sichert nach jeder Änderung automatisch in deine Dropbox, Ordner Apps/Fahrtenbuch.<br>${d.last ? 'Letzte Dropbox-Sicherung: ' + fullDate(d.last) + ', ' + timeVal(d.last) : 'Noch keine Dropbox-Sicherung.'}${d.error ? `<br><span class="warn">${esc(d.error)}</span>` : ''}</p>
+        <div class="actions"><button class="btn primary" id="dbxNow">Jetzt in Dropbox sichern</button><button class="btn" id="dbxLoad">Aus Dropbox laden</button><button class="btn danger" id="dbxOff">Trennen</button></div>`;
+      box.querySelector('#dbxNow').onclick = async () => { const done = busy('Sichere in Dropbox…'); await dbxBackup(); done(); draw(); };
+      box.querySelector('#dbxLoad').onclick = async () => {
+        const done = busy('Lade aus Dropbox…');
+        try {
+          const b = await dbxDownload('/Fahrtenbuch_Sicherung.json');
+          if (!b) { done(); toast('In der Dropbox liegt noch keine Sicherung.'); return; }
+          const r = await mergeBackup(JSON.parse(await b.text()), k => dbxDownload(`/Fotos/${k.replace(':', '_')}.jpg`));
+          done(); closeSheet(); render(); toast(r ? `${r.added} Fahrten übernommen, ${r.updated} aktualisiert.` : 'Die Sicherung in der Dropbox ist ungültig.');
+        } catch (e) { done(); toast('Laden fehlgeschlagen: ' + (e.message || e)); }
+      };
+      box.querySelector('#dbxOff').onclick = async () => { delete S.settings.dropbox; dbxToken = null; await store.set('settings', S.settings); draw(); };
+      return;
+    }
+    box.innerHTML = `<p class="hint" style="margin:0"><b>Automatisch in Dropbox sichern</b></p>
+      <details><summary class="hint">Einmalige Einrichtung (ca. 5 Minuten)</summary><ol class="hint steps-list">
+        <li>Am Computer oder in Safari dropbox.com/developers/apps öffnen und mit deinem Dropbox-Konto anmelden.</li>
+        <li>„Create app“: <b>Scoped access</b>, <b>App folder</b>, Name z.B. „Fahrtenbuch-Thomas“.</li>
+        <li>Im Reiter „Permissions“ <b>files.content.write</b> und <b>files.content.read</b> anhaken und „Submit“ tippen.</li>
+        <li>Im Reiter „Settings“ den <b>App key</b> kopieren und unten einfügen.</li>
+      </ol></details>
+      <label class="field"><span class="lbl">Dropbox App-Key</span><input id="dbxKey" value="${esc(d.appKey || '')}" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="z.B. a1b2c3d4e5f6g7h"></label>
+      <button class="btn" id="dbxAuth">Bei Dropbox anmelden</button>
+      <div id="dbxCodeBox" hidden style="display:grid;gap:10px">
+        <p class="hint" style="margin:0">Auf der Dropbox-Seite „Zulassen“ tippen, den angezeigten Code kopieren und hier einfügen.</p>
+        <label class="field"><span class="lbl">Code von Dropbox</span><input id="dbxCode" autocapitalize="off" autocomplete="off" spellcheck="false"></label>
+        <button class="btn primary" id="dbxGo">Verbinden</button>
+      </div>`;
+    let verifier = null;
+    box.querySelector('#dbxAuth').onclick = async () => {
+      const key = box.querySelector('#dbxKey').value.trim();
+      if (!key) { toast('Bitte zuerst den App-Key einfügen.'); return; }
+      verifier = dbxVerifier();
+      const win = window.open('about:blank', '_blank');
+      const url = await dbxAuthUrl(key, verifier);
+      if (win) win.location = url; else location.href = url;
+      S.settings.dropbox = { ...(S.settings.dropbox || {}), appKey: key }; store.set('settings', S.settings);
+      const cb = box.querySelector('#dbxCodeBox'); cb.hidden = false; cb.style.display = 'grid';
+    };
+    box.querySelector('#dbxGo').onclick = async () => {
+      const code = box.querySelector('#dbxCode').value.trim(); if (!code || !verifier) return;
+      const done = busy('Verbinde mit Dropbox…');
+      try { await dbxConnect(box.querySelector('#dbxKey').value.trim(), verifier, code); done(); toast('Mit Dropbox verbunden.'); await dbxBackup(); draw(); }
+      catch (e) { done(); toast('Verbinden fehlgeschlagen: ' + (e.message || e)); }
+    };
+  };
+  draw();
+}
 function openBackup() {
   openSheet(`
     <div class="sheet-head"><h3>Sicherung</h3><button class="btn small" data-close>Schließen</button></div>
@@ -1793,7 +1927,8 @@ function openBackup() {
     <div class="actions">
       <button class="btn primary" id="b_save">Sicherung speichern</button>
       <label class="btn" style="display:grid;place-items:center">Sicherung laden<input type="file" id="b_load" accept=".json,application/json" hidden></label>
-    </div>`, sheet => {
+    </div>
+    <div class="box" id="dbx" style="display:grid;gap:10px;margin-top:14px"></div>`, sheet => {
     // the file is built as soon as the sheet opens, so one tap on the button opens the share sheet right away
     const build = (async () => {
       const photos = {};
@@ -1811,20 +1946,12 @@ function openBackup() {
     };
     sheet.querySelector('#b_load').onchange = async e => {
       const file = e.target.files[0]; if (!file) return;
-      try {
-        const data = JSON.parse(await file.text());
-        if (data.app !== 'fahrtenbuch' || !Array.isArray(data.trips)) throw new Error('format');
-        let added = 0, updated = 0;
-        for (const t of data.trips) {
-          const cur = S.trips.find(x => x.id === t.id);
-          if (!cur) { S.trips.push(t); await store.putTrip(t); added++; }
-          else if ((t.updated || 0) > (cur.updated || 0)) { Object.assign(cur, t); await store.putTrip(cur); updated++; }
-        }
-        for (const [k, u] of Object.entries(data.photos || {})) { if (!(await store.getPhoto(k).catch(() => null))) await store.putPhoto(k, await (await fetch(u)).blob()); }
-        if (data.settings && !S.settings.name && !S.settings.vehicle) { S.settings = { ...S.settings, ...data.settings }; await store.set('settings', S.settings); }
-        closeSheet(); render(); toast(`${added} Fahrten übernommen, ${updated} aktualisiert.`);
-      } catch { toast('Diese Datei ist keine Fahrtenbuch-Sicherung.'); }
+      let data; try { data = JSON.parse(await file.text()); } catch { data = null; }
+      const r = await mergeBackup(data);
+      if (!r) { toast('Diese Datei ist keine Fahrtenbuch-Sicherung.'); return; }
+      closeSheet(); render(); toast(`${r.added} Fahrten übernommen, ${r.updated} aktualisiert.`);
     };
+    bindDropbox(sheet);
   });
 }
 function openSettings(focus) {
@@ -1894,7 +2021,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-21.3';
+const APP_VERSION = '2026-10-21.4';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
@@ -1943,7 +2070,8 @@ function applyUpdate(v) {
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => { swReg = r; }).catch(() => {});
   setTimeout(checkForUpdate, 3000);
   setInterval(() => { if (document.visibilityState === 'visible') checkForUpdate(); }, 30 * 60e3);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { checkForUpdate(); autoDropbox(); } });
+  addEventListener('online', autoDropbox);
 })();
 </script>
 </body>
