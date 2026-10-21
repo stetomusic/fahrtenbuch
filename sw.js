@@ -1,5 +1,5 @@
 // Offline cache for the app shell. Maps, address lookup and routing need a connection.
-const CACHE = 'fahrtenbuch-v8';
+const CACHE = 'fahrtenbuch-v9';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg', './car-180.png', './car-192.png', './apple-touch-icon.png',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'];
 self.addEventListener('install', e => {
@@ -13,10 +13,12 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || url.searchParams.has('check')) return;
   const sameOrigin = url.origin === self.location.origin;
   const staticCdn = url.host === 'unpkg.com' || url.host === 'cdn.jsdelivr.net' || url.host.endsWith('fonts.googleapis.com') || url.host.endsWith('fonts.gstatic.com');
+  // icons and the manifest go straight to the network: the iPhone reads them when adding to the home screen
+  if (sameOrigin && /\.(png|svg|webmanifest)$/.test(url.pathname)) return;
   if (sameOrigin) {
     // Network first, so updates arrive; cache as fallback when offline.
     e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
-      .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html'))));
+      .catch(() => caches.match(e.request).then(r => r || (e.request.mode === 'navigate' ? caches.match('./index.html') : Response.error()))));
   } else if (staticCdn) {
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request).then(res => { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return res; })));
   }

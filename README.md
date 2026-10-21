@@ -21,6 +21,7 @@ Unter den Jahreszahlen zeigt ein Balken, wie viele der 30.000 km im Jahr schon e
 - Die Daten liegen nur auf deinem iPhone. Unter **Sicherung** regelmäßig eine Sicherung in iCloud Drive speichern. Die App erinnert dich monatlich daran, wenn es neue Fahrten seit der letzten Sicherung gibt (in den Einstellungen auf wöchentlich oder aus stellbar).
 - Wird die App während der Fahrt geschlossen, berechnet sie die km am Ende über die Route (Start → Ziel). Umwege fehlen dann.
 - Die Tacho-Fotos werden mit der Fahrt gespeichert und in der Sicherung mitgesichert. In den Einstellungen kannst du festlegen, ob die App jedes Mal fragt, immer die Kamera öffnet, immer eintippen lässt oder gar nicht nach dem KM-Stand fragt.
+- Kamera: In den Einstellungen wählst du zwischen „iPhone-Kamera, danach Rahmen setzen“ (fragt nie nach Erlaubnis, Standard in der Home-Bildschirm-App) und dem „Live-Scanner“ (erkennt automatisch, das iPhone fragt aber oft nach der Kamera-Erlaubnis). Bei der iPhone-Kamera machst du ein Foto, schiebst danach den Rahmen über den Gesamt-KM-Stand und tippst auf „Übernehmen“.
 - Neue Versionen lädt die App automatisch, sobald du sie öffnest.
 - Nachträgliche Änderungen werden je Fahrt protokolliert und im Export markiert.
 - Kilometergeld: 0,50 €/km (PKW, seit 2025), höchstens 30.000 km pro Jahr. In den Einstellungen änderbar.

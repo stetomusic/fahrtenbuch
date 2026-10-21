@@ -209,6 +209,11 @@ dl.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
 .scanner video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .scan-frame { position: absolute; left: 8%; right: 8%; top: 39%; height: 11%; border: 3px solid #fff; border-radius: 12px; box-shadow: 0 0 0 100vmax rgba(0,0,0,.6); transition: border-color .2s; z-index: 1; }
 .scan-frame.ok { border-color: #3cbf8e; }
+.scanner.photo .scan-frame { pointer-events: none; }
+.scanner .pan { position: absolute; inset: 0; overflow: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.scanner .pan-img { display: block; max-width: none; height: auto; margin: 45vh 40vw; }
+.scanner .zoom { display: flex; gap: 10px; justify-content: center; margin-top: 6px; }
+.scanner .zoom .btn { background: rgba(255,255,255,.14); color: #fff; border-color: rgba(255,255,255,.3); min-width: 48px; font-size: 20px; }
 .scan-top { position: absolute; z-index: 2; left: 0; right: 0; top: 0; padding: calc(18px + env(safe-area-inset-top, 0px)) 20px 0; display: grid; gap: 4px; text-align: center; }
 .scan-top b { font: 700 24px var(--font-display); text-transform: uppercase; letter-spacing: .04em; }
 .scan-bottom { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; padding: 0 max(16px, env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 14px; }
@@ -437,10 +442,11 @@ function bindCams(root, expectedFor, onPhoto) {
 /* ---------- live scanner: only the framed strip is read ---------- */
 let scannerBroken = !(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 // Must run inside a tap: the photo fallback can only open the camera from a tap.
-function camRequest() { return scannerBroken ? { file: new Promise(r => pickPhoto(r)) } : { live: true }; }
+const camMode = () => S.settings.camMode || (navigator.standalone ? 'photo' : 'live');
+function camRequest() { return scannerBroken || camMode() === 'photo' ? { file: new Promise(r => pickPhoto(r)) } : { live: true }; }
 function runCamRequest(req, ctx, inputId) {
   if (!ctx || !req) return;
-  if (req.file) req.file.then(f => processOdoPhoto(f, ctx.root, inputId, ctx.expected, ctx.onPhoto));
+  if (req.file) req.file.then(f => photoInto(f, ctx.root, inputId, ctx.expected, ctx.onPhoto));
   else scanInto(ctx.root, inputId, ctx.expected, ctx.onPhoto);
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -672,6 +678,71 @@ function frameBlob(video) {
   c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
   return canvasBlob(c, 0.7);
 }
+// Read the number in a cropped strip: own decoders first (7-segment LCD, dot-matrix, both polarities), general text recognition as a suggestion
+async function decodeCrop(crop, expected, w) {
+  const s1 = prepStrip(crop), s2 = prepStrip(crop, true);
+  const ok = v => v != null && (expected != null ? (v >= expected && v <= expected + 5000) : String(v).length >= 5);
+  const reads = [[readSevenSeg(s1), s1, true], [readSevenSeg(s2), s2, true], [readDotMatrix(s1), s1, false], [readDotMatrix(s2), s2, false]];
+  let pick = null;
+  for (const [txt, st, seg] of reads) { if (seg && txt.includes('?')) continue; const v = odoCandidates(txt, expected)[0]; if (ok(v)) { pick = { v, st }; break; } }
+  const cut = !pick && reads.some(r => r[2] && /\d\?|\?\d/.test(r[0]));
+  let c = pick ? pick.v : null, fromSeg = !!pick;
+  if (!ok(c) && w) {
+    fromSeg = false;
+    await w.setParameters({ tessedit_pageseg_mode: '7' });
+    const r = await w.recognize(pick ? pick.st : s1);
+    const c2 = odoCandidates(r.data.text, expected)[0];
+    if (c2 != null && (ok(c2) || c == null)) c = c2;
+  }
+  const plausible = c != null && (expected != null ? (c >= expected && c <= expected + 5000) : String(c).length >= 4);
+  return { c, fromSeg, cut, plausible };
+}
+// Photo mode: the iPhone camera app takes the picture (no permission prompt), then the frame is moved over the digits
+function framePhoto(file, expected, label, inputId) {
+  return new Promise(async resolve => {
+    let img; try { img = await loadImg(file); } catch { toast('Das Foto konnte nicht geöffnet werden.'); resolve(null); return; }
+    const ov = document.createElement('div'); ov.className = 'scanner photo'; ov.setAttribute('role', 'dialog');
+    ov.innerHTML = `<div class="pan"></div><div class="scan-frame"></div>
+      <div class="scan-top"><b>${esc(label)}</b><span>Foto verschieben, bis der Gesamt-KM-Stand im Rahmen ist</span><div class="zoom"><button class="btn small" data-z="-1" aria-label="Verkleinern">−</button><button class="btn small" data-z="1" aria-label="Vergrößern">+</button></div></div>
+      <div class="scan-bottom"><div class="scan-read msg" aria-live="polite">Lese…</div>
+        <div class="scan-actions"><button class="btn primary" data-a="ok" disabled>Übernehmen</button><button class="btn" data-a="manual">Eintippen</button><button class="btn" data-a="cancel">Abbrechen</button></div></div>`;
+    document.body.appendChild(ov);
+    const pan = ov.querySelector('.pan'), frame = ov.querySelector('.scan-frame'), readEl = ov.querySelector('.scan-read'), okBtn = ov.querySelector('[data-a=ok]');
+    img.className = 'pan-img'; img.alt = 'Foto KM-Stand'; pan.appendChild(img);
+    const zooms = [1, 1.6, 2.5, 4]; let zi = 2, best = null, timer = null, seq = 0, w = null, done = false;
+    getOcr().then(x => { w = x; }).catch(() => {});
+    const blob = canvasBlob(toCanvas(img, 1280), 0.7).catch(() => null);
+    const finish = r => { if (done) return; done = true; ov.remove(); resolve(r); };
+    const setZoom = (k, keepCenter = true) => {
+      const cx = (pan.scrollLeft + pan.clientWidth / 2) / pan.scrollWidth, cy = (pan.scrollTop + pan.clientHeight / 2) / pan.scrollHeight;
+      zi = Math.max(0, Math.min(zooms.length - 1, k));
+      img.style.width = (pan.clientWidth * zooms[zi]) + 'px';
+      pan.scrollLeft = (keepCenter ? cx : 0.5) * pan.scrollWidth - pan.clientWidth / 2;
+      pan.scrollTop = (keepCenter ? cy : 0.5) * pan.scrollHeight - pan.clientHeight / 2;
+      schedule();
+    };
+    const read = async () => {
+      const my = ++seq;
+      const ir = img.getBoundingClientRect(), fr = frame.getBoundingClientRect(), k = img.naturalWidth / ir.width;
+      const sx = Math.max(0, (fr.left - ir.left) * k), sy = Math.max(0, (fr.top - ir.top) * k);
+      const sw = Math.min(img.naturalWidth - sx, fr.width * k), sh = Math.min(img.naturalHeight - sy, fr.height * k);
+      if (sw < 10 || sh < 10) { readEl.classList.add('msg'); readEl.textContent = 'Rahmen über die Zahl schieben'; return; }
+      const c = document.createElement('canvas'); c.width = Math.round(sw); c.height = Math.round(sh);
+      c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+      let r; try { r = await decodeCrop(c, expected, w); } catch { r = { c: null }; }
+      if (my !== seq || done) return;
+      if (r.c != null) { best = r.c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(r.c)}`; readEl.classList.remove('msg'); readEl.textContent = fmtInt(r.c) + (r.plausible && r.fromSeg ? '' : ' ?'); }
+      else { readEl.classList.add('msg'); readEl.textContent = 'Keine Zahl im Rahmen. Foto verschieben oder zoomen.'; }
+    };
+    const schedule = () => { clearTimeout(timer); timer = setTimeout(read, 250); };
+    pan.addEventListener('scroll', schedule, { passive: true });
+    ov.querySelectorAll('[data-z]').forEach(b => b.onclick = () => setZoom(zi + +b.dataset.z));
+    ov.querySelector('[data-a=cancel]').onclick = () => finish(null);
+    ov.querySelector('[data-a=manual]').onclick = async () => { const b = await blob; finish({ manual: true, blob: b }); const i = document.getElementById(inputId); if (i) { i.focus(); i.select?.(); } };
+    okBtn.onclick = async () => { if (best == null) return; frame.classList.add('ok'); finish({ value: best, blob: await blob }); };
+    requestAnimationFrame(() => setZoom(zi, false));
+  });
+}
 // Resolves {value, blob} when taken, {manual:true} for typing, {fallback:true} if the live camera is unavailable, null on cancel
 function scanOdometer(expected, label, inputId) {
   return new Promise(async resolve => {
@@ -699,30 +770,14 @@ function scanOdometer(expected, label, inputId) {
     while (!stopped) {
       if (video.videoWidth && document.visibilityState === 'visible') {
         try {
-          const crop = cropFrame(video, frame), s1 = prepStrip(crop), s2 = prepStrip(crop, true);
-          const ok = v => v != null && (expected != null ? (v >= expected && v <= expected + 5000) : String(v).length >= 5);
-          // own decoders first: 7-segment LCD, then dot-matrix, each in both brightness polarities
-          const reads = [[readSevenSeg(s1), s1, true], [readSevenSeg(s2), s2, true], [readDotMatrix(s1), s1, false], [readDotMatrix(s2), s2, false]];
-          let pick = null;
-          for (const [txt, st, seg] of reads) { if (seg && txt.includes('?')) continue; const v = odoCandidates(txt, expected)[0]; if (ok(v)) { pick = { v, st }; break; } }
-          const cut = !pick && reads.some(r => r[2] && /\d\?|\?\d/.test(r[0]));
-          const strip = pick ? pick.st : s1;
-          let c = pick ? pick.v : null, fromSeg = !!pick;
-          if (!ok(c) && w) {
-            fromSeg = false;
-            await w.setParameters({ tessedit_pageseg_mode: '7' });
-            const r = await w.recognize(strip);
-            if (stopped) break;
-            const c2 = odoCandidates(r.data.text, expected)[0];
-            if (c2 != null && (ok(c2) || c == null)) c = c2;
-          }
-          if (c != null) {
-            const plausible = expected != null ? (c >= expected && c <= expected + 5000) : String(c).length >= 4;
-            best = c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(c)}`;
-            readEl.classList.remove('msg'); readEl.textContent = fmtInt(c) + (plausible && fromSeg ? '' : ' ?');
-            hintEl.textContent = cut ? 'Ziffern abgeschnitten? Zahl mittig in den Rahmen halten.' : 'Nur die Zeile mit dem Gesamt-KM-Stand in den Rahmen halten';
-            streak = c === last ? streak + 1 : 1; last = c;
-            if (plausible && fromSeg && streak >= 2) { readEl.textContent = `${fmtInt(c)} erkannt`; await sleep(350); take(c); break; }
+          const r = await decodeCrop(cropFrame(video, frame), expected, w);
+          if (stopped) break;
+          if (r.c != null) {
+            best = r.c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(r.c)}`;
+            readEl.classList.remove('msg'); readEl.textContent = fmtInt(r.c) + (r.plausible && r.fromSeg ? '' : ' ?');
+            hintEl.textContent = r.cut ? 'Ziffern abgeschnitten? Zahl mittig in den Rahmen halten.' : 'Nur die Zeile mit dem Gesamt-KM-Stand in den Rahmen halten';
+            streak = r.c === last ? streak + 1 : 1; last = r.c;
+            if (r.plausible && r.fromSeg && streak >= 2) { readEl.textContent = `${fmtInt(r.c)} erkannt`; await sleep(350); take(r.c); break; }
           }
         } catch (e) { console.warn(e); }
       }
@@ -740,6 +795,17 @@ async function scanInto(root, inputId, expectedFor, onPhoto) {
   input.value = res.value; input.dispatchEvent(new Event('input', { bubbles: true }));
   const chips = root.querySelector(`[data-chips="${inputId}"]`); if (chips) chips.hidden = true;
   if (res.blob) { try { await store.putPhoto(btn.dataset.key, res.blob); btn.classList.add('has'); onPhoto && onPhoto(inputId === 'f_odoEnd' ? 'end' : 'start'); } catch {} }
+  toast(`KM-Stand ${fmtInt(res.value)} übernommen.`);
+}
+async function photoInto(file, root, inputId, expectedFor, onPhoto) {
+  const btn = root.querySelector(`[data-cam="${inputId}"]`); if (!btn) return;
+  const res = await framePhoto(file, expectedFor(inputId), inputId === 'f_odoEnd' ? 'KM-Stand Ende' : 'KM-Stand Beginn', inputId);
+  if (!res) return;
+  if (res.blob) { try { await store.putPhoto(btn.dataset.key, res.blob); btn.classList.add('has'); onPhoto && onPhoto(inputId === 'f_odoEnd' ? 'end' : 'start'); } catch {} }
+  if (res.manual) return;
+  const input = root.querySelector('#' + inputId); if (!input) return;
+  input.value = res.value; input.dispatchEvent(new Event('input', { bubbles: true }));
+  const chips = root.querySelector(`[data-chips="${inputId}"]`); if (chips) chips.hidden = true;
   toast(`KM-Stand ${fmtInt(res.value)} übernommen.`);
 }
 async function processOdoPhoto(file, root, inputId, expectedFor, onPhoto) {
@@ -1720,6 +1786,7 @@ function openSettings(focus) {
       </div>
       <label class="field"><span class="lbl">KM-Stand bei Start und Ende</span><select id="s_odo">${[['ask', 'Jedes Mal fragen'], ['camera', 'Immer Tacho fotografieren'], ['manual', 'Immer selbst eintippen'], ['off', 'Nicht abfragen']].map(([k, l]) => `<option value="${k}" ${odoMode() === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="field"><span class="lbl">Erinnerung an Sicherung</span><select id="s_bk">${[['month', 'Monatlich'], ['week', 'Wöchentlich'], ['off', 'Aus']].map(([k, l]) => `<option value="${k}" ${(s.backupRemind || 'month') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field"><span class="lbl">Kamera für den KM-Stand</span><select id="s_cam">${[['photo', 'iPhone-Kamera, danach Rahmen setzen (fragt nicht nach Erlaubnis)'], ['live', 'Live-Scanner (fragt am iPhone oft nach Erlaubnis)']].map(([k, l]) => `<option value="${k}" ${camMode() === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <fieldset class="box" id="sec_l17"><legend>L17-Führerschein</legend>
         <label class="check"><input type="checkbox" id="l_on" ${c.on ? 'checked' : ''}><span>L17-Übungsfahrten dokumentieren</span></label>
         <div id="l17fields" style="display:grid;gap:12px" ${c.on ? '' : 'hidden'}>
@@ -1760,7 +1827,7 @@ function openSettings(focus) {
       vs.forEach(v => { if (!v.name) v.name = v.plate || 'Auto'; });
       const q = id => sheet.querySelector('#' + id);
       S.settings = { ...S.settings, name: q('s_name').value.trim(), vehicles: vs, vehicleId: vs.some(v => v.id === S.settings.vehicleId) ? S.settings.vehicleId : vs[0].id,
-        rate: num(q('s_rate').value) ?? 0.5, defaultType: q('s_type').value, odoMode: q('s_odo').value, backupRemind: q('s_bk').value,
+        rate: num(q('s_rate').value) ?? 0.5, defaultType: q('s_type').value, odoMode: q('s_odo').value, backupRemind: q('s_bk').value, camMode: q('s_cam').value,
         mode: q('l_on').checked && !c.on ? 'l17' : S.settings.mode,
         l17: { on: q('l_on').checked, learner: q('l_learner').value.trim(), birth: q('l_birth').value, companions: q('l_comp').value.trim(), s1: q('l_s1').value, s2: q('l_s2').value } };
       await store.set('settings', S.settings); closeSheet(); render(); toast('Einstellungen gespeichert.');
@@ -1769,7 +1836,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-20.16';
+const APP_VERSION = '2026-10-21.1';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
