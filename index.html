@@ -1788,18 +1788,24 @@ function openBackup() {
   openSheet(`
     <div class="sheet-head"><h3>Sicherung</h3><button class="btn small" data-close>Schließen</button></div>
     <p class="hint">Deine Fahrten und Tacho-Fotos sind nur auf diesem Handy gespeichert. Speichere regelmäßig eine Sicherung, z.B. in iCloud Drive, damit nichts verloren geht.</p>
+    <p class="hint">Tipp: Im Teilen-Menü „In Dateien sichern“ wählen. Das iPhone merkt sich den zuletzt benutzten iCloud-Ordner.</p>
     <p class="hint"><b>${S.settings.lastBackup ? 'Letzte Sicherung: ' + fullDate(S.settings.lastBackup) : 'Noch keine Sicherung gespeichert.'}</b></p>
     <div class="actions">
       <button class="btn primary" id="b_save">Sicherung speichern</button>
       <label class="btn" style="display:grid;place-items:center">Sicherung laden<input type="file" id="b_load" accept=".json,application/json" hidden></label>
     </div>`, sheet => {
-    sheet.querySelector('#b_save').onclick = async () => {
-      const done = busy('Sicherung wird erstellt…');
+    // the file is built as soon as the sheet opens, so one tap on the button opens the share sheet right away
+    const build = (async () => {
       const photos = {};
       const toData = b => new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); });
       for (const t of S.trips) for (const w of ['start', 'end']) { if (!t.photos?.[w]) continue; const b = await store.getPhoto(`${t.id}:${w}`).catch(() => null); if (b) photos[`${t.id}:${w}`] = await toData(b); }
-      done();
-      deliverFile(`Fahrtenbuch_Sicherung_${dateVal(Date.now())}.json`, new Blob([JSON.stringify({ app: 'fahrtenbuch', version: 2, exported: Date.now(), settings: S.settings, trips: S.trips, photos })], { type: 'application/json' }), async () => {
+      return new Blob([JSON.stringify({ app: 'fahrtenbuch', version: 2, exported: Date.now(), settings: S.settings, trips: S.trips, photos })], { type: 'application/json' });
+    })();
+    let ready = null; build.then(b => { ready = b; });
+    sheet.querySelector('#b_save').onclick = async () => {
+      let blob = ready;
+      if (!blob) { const done = busy('Sicherung wird erstellt…'); blob = await build; done(); }
+      deliverFile(`Fahrtenbuch_Sicherung_${dateVal(Date.now())}.json`, blob, async () => {
         S.settings.lastBackup = Date.now(); delete S.settings.backupSnooze; await store.set('settings', S.settings); render(); toast('Sicherung gespeichert.');
       });
     };
@@ -1888,7 +1894,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-21.2';
+const APP_VERSION = '2026-10-21.3';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
