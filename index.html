@@ -218,6 +218,9 @@ dl.kv dd { margin: 0; font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
 .scan-top b { font: 700 24px var(--font-display); text-transform: uppercase; letter-spacing: .04em; }
 .scan-bottom { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; padding: 0 max(16px, env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 14px; }
 .scan-read { text-align: center; font: 500 30px var(--font-mono); min-height: 40px; font-variant-numeric: tabular-nums; }
+.scan-note { display: block; font: 400 14px var(--font-body); opacity: .8; margin-top: 4px; }
+.scan-alt { display: flex; gap: 8px; justify-content: center; margin-top: 6px; }
+.scan-alt .btn { background: rgba(255,255,255,.14); color: #fff; border-color: rgba(255,255,255,.3); font: 500 15px var(--font-mono); }
 .scan-read.msg { font: 500 17px var(--font-body); }
 .scan-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .scan-actions .btn { background: rgba(255,255,255,.14); color: #fff; border-color: rgba(255,255,255,.3); }
@@ -697,6 +700,52 @@ async function decodeCrop(crop, expected, w) {
   const plausible = c != null && (expected != null ? (c >= expected && c <= expected + 5000) : String(c).length >= 4);
   return { c, fromSeg, cut, plausible };
 }
+// Photo mode: read many windows around the frame and vote, so a frame that sits a bit off still gives the right number
+function segReads(crop, expected) {
+  const s1 = prepStrip(crop), s2 = prepStrip(crop, true), out = [];
+  for (const [txt, seg] of [[readSevenSeg(s1), 1], [readSevenSeg(s2), 1], [readDotMatrix(s1), 0], [readDotMatrix(s2), 0]]) {
+    if (seg && txt.includes('?')) continue;
+    const v = odoCandidates(txt, expected)[0];
+    if (v != null && String(v).length >= 4) out.push(v);
+  }
+  return out;
+}
+async function decodeSearch(img, f, expected, w) {
+  const votes = new Map(), add = (v, k) => votes.set(v, (votes.get(v) || 0) + k);
+  const cut = (x, y, cw, ch) => {
+    x = Math.max(0, x); y = Math.max(0, y); cw = Math.min(img.naturalWidth - x, cw); ch = Math.min(img.naturalHeight - y, ch);
+    if (cw < 10 || ch < 6) return null;
+    const c = document.createElement('canvas'), k = Math.min(1, 900 / cw); c.width = Math.round(cw * k); c.height = Math.max(1, Math.round(ch * k));
+    c.getContext('2d').drawImage(img, x, y, cw, ch, 0, 0, c.width, c.height); return c;
+  };
+  let n = 0;
+  for (const hk of [1, 0.7]) for (const wk of [1, 1.2]) for (const dy of [0, -0.17, 0.17, -0.33, 0.33, -0.5, 0.5]) {
+    const ch = f.sh * hk, cw = f.sw * wk, c = cut(f.sx - (cw - f.sw) / 2, f.sy + f.sh / 2 + dy * f.sh - ch / 2, cw, ch);
+    if (!c) continue;
+    const vs = new Set(segReads(c, expected)); vs.forEach(v => add(v, dy === 0 && hk === 1 && wk === 1 ? 1.5 : 1));
+    if (++n % 6 === 0) await sleep(0);
+  }
+  // a number missing its last digit counts for the full one; a stray "1" in front (edge of the display) counts for the number without it
+  const v0 = new Map(votes);
+  for (const [v, k] of v0) for (const [u] of v0) {
+    const sv = String(v), su = String(u);
+    if (su.length === sv.length + 1 && su.startsWith(sv)) add(u, k * 0.5);
+    if (sv.length === su.length + 1 && sv[0] === '1' && sv.endsWith(su)) { add(u, k); votes.set(v, votes.get(v) - k * 0.5); }
+  }
+  // the same digit everywhere (111111) is usually the display edge, not a reading
+  for (const [v, k] of votes) if (/^(\d)\1+$/.test(String(v))) votes.set(v, k * 0.3);
+  const plaus = v => expected != null && v >= expected && v <= expected + 5000;
+  const ranked = [...votes].map(([v, k]) => [v, k + (plaus(v) ? 3 : 0) + String(v).length * 0.2]).sort((a, b) => b[1] - a[1]);
+  if (ranked.length) {
+    const [v] = ranked[0], k = votes.get(v);
+    const sure = k >= 2.5 && (expected == null || plaus(v));
+    return { c: v, fromSeg: true, plausible: sure, sure, alt: ranked.slice(1, 3).map(r => r[0]) };
+  }
+  // no own decoder found anything: the general text recognition only gives a suggestion
+  const c = cut(f.sx, f.sy, f.sw, f.sh);
+  if (c && w) { const r = await decodeCrop(c, expected, w); if (r.c != null) return { c: r.c, fromSeg: false, plausible: false, sure: false, alt: [] }; }
+  return { c: null };
+}
 // Photo mode: the iPhone camera app takes the picture (no permission prompt), then the frame is moved over the digits
 function framePhoto(file, expected, label, inputId) {
   return new Promise(async resolve => {
@@ -727,12 +776,15 @@ function framePhoto(file, expected, label, inputId) {
       const sx = Math.max(0, (fr.left - ir.left) * k), sy = Math.max(0, (fr.top - ir.top) * k);
       const sw = Math.min(img.naturalWidth - sx, fr.width * k), sh = Math.min(img.naturalHeight - sy, fr.height * k);
       if (sw < 10 || sh < 10) { readEl.classList.add('msg'); readEl.textContent = 'Rahmen über die Zahl schieben'; return; }
-      const c = document.createElement('canvas'); c.width = Math.round(sw); c.height = Math.round(sh);
-      c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
-      let r; try { r = await decodeCrop(c, expected, w); } catch { r = { c: null }; }
+      readEl.classList.add('msg'); readEl.textContent = 'Lese…';
+      let r; try { r = await decodeSearch(img, { sx, sy, sw, sh }, expected, w); } catch (e) { console.warn(e); r = { c: null }; }
       if (my !== seq || done) return;
-      if (r.c != null) { best = r.c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(r.c)}`; readEl.classList.remove('msg'); readEl.textContent = fmtInt(r.c) + (r.plausible && r.fromSeg ? '' : ' ?'); }
-      else { readEl.classList.add('msg'); readEl.textContent = 'Keine Zahl im Rahmen. Foto verschieben oder zoomen.'; }
+      if (r.c != null) {
+        best = r.c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(r.c)}`; readEl.classList.remove('msg');
+        readEl.innerHTML = esc(fmtInt(r.c)) + (r.sure ? '' : ' ?') + (r.sure ? '' : `<small class="scan-note">${r.fromSeg ? 'Unsicher, bitte mit dem Tacho vergleichen.' : 'Nur ein Vorschlag, bitte prüfen.'}</small>`);
+        const alt = (r.alt || []).filter(v => !String(r.c).includes(String(v)));
+        if (!r.sure && alt.length) { readEl.insertAdjacentHTML('beforeend', `<span class="scan-alt">${alt.map(v => `<button type="button" class="btn small" data-alt="${v}">${fmtInt(v)}</button>`).join('')}</span>`); readEl.querySelectorAll('[data-alt]').forEach(b => b.onclick = () => { best = +b.dataset.alt; okBtn.textContent = `Übernehmen: ${fmtInt(best)}`; }); }
+      } else { best = null; okBtn.disabled = true; okBtn.textContent = 'Übernehmen'; readEl.classList.add('msg'); readEl.textContent = 'Keine Zahl im Rahmen. Foto verschieben oder zoomen.'; }
     };
     const schedule = () => { clearTimeout(timer); timer = setTimeout(read, 250); };
     pan.addEventListener('scroll', schedule, { passive: true });
@@ -1836,7 +1888,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-21.1';
+const APP_VERSION = '2026-10-21.2';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
