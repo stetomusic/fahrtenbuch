@@ -467,13 +467,37 @@ function otsu(hist, n) {
   return th;
 }
 // Scale the strip to a fixed height, binarize, make digits dark on white
-function prepStrip(src, invert = false) {
+function prepStrip(src, invert = false, glyph = false) {
   const H = 90, W = Math.max(40, Math.min(1400, Math.round(src.width * H / src.height))), pad = 20;
   const c = document.createElement('canvas'); c.width = W + pad * 2; c.height = H + pad * 2;
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(src, pad, pad, W, H);
   const d = ctx.getImageData(pad, pad, W, H), p = d.data, n = W * H, g = new Uint8Array(n), hist = new Uint32Array(256);
-  for (let i = 0, j = 0; j < n; i += 4, j++) { g[j] = (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000; hist[g[j]]++; }
+  // glyph: 'gray', 'red' or 'green' picks the colour channel for the printed-digit decoder (coloured displays differ a lot)
+  let bestSep = -1;
+  for (const [wr, wg, wb] of [{ red: [1000, 0, 0], green: [0, 1000, 0] }[glyph] || [299, 587, 114]]) {
+    const h2 = new Uint32Array(256), g2 = new Uint8Array(n);
+    for (let i = 0, j = 0; j < n; i += 4, j++) { g2[j] = (p[i] * wr + p[i + 1] * wg + p[i + 2] * wb) / 1000; h2[g2[j]]++; }
+    const t2 = otsu(h2, n); let s0 = 0, s1 = 0, n0 = 0, n1 = 0, all = 0, all2 = 0;
+    for (let t = 0; t < 256; t++) { const c = h2[t]; all += c * t; all2 += c * t * t; if (t <= t2) { s0 += c * t; n0 += c; } else { s1 += c * t; n1 += c; } }
+    const mean = all / n, varT = all2 / n - mean * mean; if (!n0 || !n1 || varT < 1) continue;
+    const sep = (n0 / n) * (n1 / n) * (s0 / n0 - s1 / n1) ** 2 / varT;
+    if (sep > bestSep) { bestSep = sep; g.set(g2); hist.set(h2); }
+  }
+  // soften a little, so digits made of separate dots (pixel fonts) come out as solid strokes
+  if (glyph) { const b = new Uint8Array(n); hist.fill(0);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let s = 0, c = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H) { s += g[yy * W + xx]; c++; } } b[y * W + x] = s / c; hist[b[y * W + x]]++; }
+    g.set(b);
+    // even out uneven lighting (glare, vignetting): compare every pixel with the average around it
+    const R = 40, I = new Float64Array((W + 1) * (H + 1));
+    for (let y = 0; y < H; y++) { let row = 0; for (let x = 0; x < W; x++) { row += g[y * W + x]; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + row; } }
+    hist.fill(0);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const xa = Math.max(0, x - R), xb = Math.min(W, x + R + 1), ya = Math.max(0, y - R), yb = Math.min(H, y + R + 1);
+      const m = (I[yb * (W + 1) + xb] - I[ya * (W + 1) + xb] - I[yb * (W + 1) + xa] + I[ya * (W + 1) + xa]) / ((xb - xa) * (yb - ya));
+      const v = Math.max(0, Math.min(255, Math.round(128 + g[y * W + x] - m))); b[y * W + x] = v; hist[v]++;
+    }
+    g.set(b); }
   const th = otsu(hist, n);
   let light = 0, border = 0;
   for (let x = 0; x < W; x++) { for (const y of [0, H - 1]) { border++; if (g[y * W + x] > th) light++; } }
@@ -482,6 +506,127 @@ function prepStrip(src, invert = false) {
   for (let i = 0, j = 0; j < n; i += 4, j++) { const on = g[j] > th; const v = (on !== darkBg) ? 255 : 0; p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.putImageData(d, pad, pad);
   return c;
+}
+// Decoder for ordinary printed digits (e.g. the red Opel display): split into characters, compare each with digits drawn in common fonts
+let GLYPHS = null;
+const GW = 12, GH = 18;
+function glyphVec(inkAt, x0, y0, x1, y1) {
+  const v = new Float32Array(GW * GH), w = x1 - x0 + 1, h = y1 - y0 + 1;
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    let s = 0, c = 0;
+    for (let sy = 0; sy < 3; sy++) for (let sx = 0; sx < 3; sx++) { const x = x0 + Math.floor((gx + (sx + 0.5) / 3) * w / GW), y = y0 + Math.floor((gy + (sy + 0.5) / 3) * h / GH); s += inkAt(x, y); c++; }
+    v[gy * GW + gx] = s / c;
+  }
+  let m = 0; v.forEach(a => { m += a; }); m /= v.length; let nn = 0; for (let i = 0; i < v.length; i++) { v[i] -= m; nn += v[i] * v[i]; } nn = Math.sqrt(nn) || 1; for (let i = 0; i < v.length; i++) v[i] /= nn;
+  return v;
+}
+// number of closed holes in a character (0, 4, 6, 9 have one, 8 has two), counted on slightly thickened ink
+function glyphHoles(inkAt, x0, y0, x1, y1) {
+  const w = x1 - x0 + 3, h = y1 - y0 + 3, a = new Uint8Array(w * h);
+  const thick = h >= 50; // small characters: no thickening, it would close their holes
+  for (let y = 0; y < h - 2; y++) for (let x = 0; x < w - 2; x++) if (inkAt(x0 + x, y0 + y)) { if (!thick) { a[(y + 1) * w + x + 1] = 1; continue; } for (let dy = 0; dy <= 2; dy++) for (let dx = 0; dx <= 2; dx++) if ((dx === 1 || dy === 1)) a[(y + dy) * w + x + dx] = 1; }
+  const seen = new Uint8Array(w * h); let holes = 0;
+  for (let st = 0; st < w * h; st++) {
+    if (a[st] || seen[st]) continue;
+    let border = false, size = 0; const q = [st]; seen[st] = 1;
+    while (q.length) { const i = q.pop(), x = i % w, y = (i / w) | 0; size++; if (x === 0 || y === 0 || x === w - 1 || y === h - 1) border = true;
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1]) if (j >= 0 && !a[j] && !seen[j]) { seen[j] = 1; q.push(j); } }
+    if (!border && size >= w * h * 0.012) holes++;
+  }
+  return Math.min(holes, 2);
+}
+// share of the character's width that has ink in its top and bottom rows (tells a 2 with its foot from a 7)
+function glyphBands(inkAt, x0, y0, x1, y1) {
+  const h = y1 - y0 + 1, w = x1 - x0 + 1, b = Math.max(1, Math.round(h * 0.13)), cov = (ya, yb) => { let n = 0; for (let x = x0; x <= x1; x++) { for (let y = ya; y <= yb; y++) if (inkAt(x, y)) { n++; break; } } return n / w; };
+  return [cov(y0, y0 + b - 1), cov(y1 - b + 1, y1)];
+}
+function glyphScore(g, t) {
+  let dot = 0; for (let i = 0; i < g.v.length; i++) dot += g.v[i] * t.v[i];
+  return dot - 0.6 * Math.abs(Math.log(g.ar / t.ar)) - (t.holes === g.holes ? 0 : 0.25) - 0.5 * (Math.abs(g.bands[0] - t.bands[0]) + Math.abs(g.bands[1] - t.bands[1]));
+}
+function glyphTemplates() {
+  if (GLYPHS) return GLYPHS;
+  GLYPHS = [];
+  const c = document.createElement('canvas'); c.width = c.height = 140; const x = c.getContext('2d', { willReadFrequently: true });
+  for (const f of ['bold 90px Arial', '90px Arial', 'bold 90px Helvetica', 'bold 90px Verdana', 'bold 90px Tahoma', 'bold 90px sans-serif', '90px sans-serif', 'bold 90px monospace', 'bold 90px "Courier New"']) for (let dg = 0; dg < 10; dg++) {
+    x.fillStyle = '#fff'; x.fillRect(0, 0, 140, 140); x.fillStyle = '#000'; x.font = f; x.fillText(String(dg), 25, 115);
+    const d = x.getImageData(0, 0, 140, 140).data; let x0 = 140, x1 = -1, y0 = 140, y1 = -1;
+    for (let y = 0; y < 140; y++) for (let xx = 0; xx < 140; xx++) if (d[(y * 140 + xx) * 4] < 128) { if (xx < x0) x0 = xx; if (xx > x1) x1 = xx; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    if (x1 < 0) continue;
+    const at = (a, b) => d[(b * 140 + a) * 4] < 128 ? 1 : 0;
+    GLYPHS.push({ d: String(dg), v: glyphVec(at, x0, y0, x1, y1), ar: (x1 - x0 + 1) / (y1 - y0 + 1), holes: glyphHoles(at, x0, y0, x1, y1), bands: glyphBands(at, x0, y0, x1, y1) });
+  }
+  return GLYPHS;
+}
+function readGlyphs(strip) {
+  const W = strip.width, H = strip.height, d = strip.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  const ink = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) ink[i] = d[i * 4] < 128 ? 1 : 0;
+  // join the dots of pixel fonts: grow ink a little before finding characters
+  const r = 2, grown = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (ink[y * W + x]) for (let dy = -r; dy <= r; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue; grown[yy * W + x] = 1; }
+  const seen = new Uint8Array(W * H), comps = [];
+  for (let st = 0; st < W * H; st++) {
+    if (!grown[st] || seen[st]) continue;
+    const q = [st]; seen[st] = 1; let x0 = W, x1 = 0, y0 = H, y1 = 0, cnt = 0;
+    while (q.length) { const i = q.pop(), x = i % W, y = (i / W) | 0; cnt++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) if (j >= 0 && grown[j] && !seen[j]) { seen[j] = 1; q.push(j); } }
+    // tighten to the real ink
+    let a0 = W, a1 = -1, b0 = H, b1 = -1;
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (ink[y * W + x]) { if (x < a0) a0 = x; if (x > a1) a1 = x; if (y < b0) b0 = y; if (y > b1) b1 = y; }
+    if (a1 < 0) continue;
+    const edge = b0 <= 20 || b1 >= H - 21 || a0 <= 20 || a1 >= W - 21; // touches the border of the cut-out
+    comps.push({ x0: a0, x1: a1, y0: b0, y1: b1, h: b1 - b0 + 1, w: a1 - a0 + 1, edge });
+  }
+  // pieces stacked in one column belong to one character (pixel fonts can break a "2" into a top and a foot)
+  for (let merged = true; merged;) {
+    merged = false;
+    for (let i = 0; i < comps.length && !merged; i++) for (let j = i + 1; j < comps.length && !merged; j++) {
+      const a = comps[i], b = comps[j], ov = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) + 1, gap = Math.max(a.y0, b.y0) - Math.min(a.y1, b.y1);
+      if (ov >= 0.6 * Math.min(a.w, b.w) && Math.max(a.w, b.w) <= 1.8 * Math.min(a.w, b.w) && gap < 0.4 * Math.max(a.h, b.h)) {
+        const x0 = Math.min(a.x0, b.x0), x1 = Math.max(a.x1, b.x1), y0 = Math.min(a.y0, b.y0), y1 = Math.max(a.y1, b.y1);
+        comps[i] = { x0, x1, y0, y1, w: x1 - x0 + 1, h: y1 - y0 + 1, edge: a.edge || b.edge }; comps.splice(j, 1); merged = true;
+      }
+    }
+  }
+  // a character touching a neighbour (e.g. the "k" of km): split at the thinnest column
+  const pad = 20, part = (x0, x1, y0, y1) => {
+    let a0 = W, a1 = -1, b0 = H, b1 = -1;
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (ink[y * W + x]) { if (x < a0) a0 = x; if (x > a1) a1 = x; if (y < b0) b0 = y; if (y > b1) b1 = y; }
+    return a1 < 0 ? null : { x0: a0, x1: a1, y0: b0, y1: b1, w: a1 - a0 + 1, h: b1 - b0 + 1, edge: b0 <= pad || b1 >= H - pad - 1 || a0 <= pad || a1 >= W - pad - 1 };
+  };
+  for (let i = 0; i < comps.length; i++) {
+    const c = comps[i]; if (c.w <= c.h * 0.75 || c.h < 12) continue;
+    let bx = -1, bn = 1e9;
+    for (let x = Math.round(c.x0 + c.h * 0.35); x <= c.x1 - Math.round(c.h * 0.1); x++) { let n = 0; for (let y = c.y0; y <= c.y1; y++) n += ink[y * W + x]; if (n < bn) { bn = n; bx = x; } }
+    if (bx < 0 || bn > Math.max(2, c.h * 0.06)) continue;
+    const l = part(c.x0, bx - 1, c.y0, c.y1), r2 = part(bx + 1, c.x1, c.y0, c.y1);
+    comps.splice(i, 1, ...[l, r2].filter(Boolean)); i--;
+  }
+  const cand = comps.filter(c => !c.edge && c.h >= 12 && c.w <= c.h * 1.1);
+  readGlyphs.score = 0;
+  if (cand.length < 3) return '';
+  // the digit line: the tallest characters of similar height that sit on one line
+  const hs = cand.map(c => c.h).sort((a, b) => b - a), href = hs[Math.min(hs.length - 1, 2)];
+  let line = cand.filter(c => c.h >= href * 0.8 && c.h <= href * 1.25).sort((a, b) => a.x0 - b.x0);
+  if (line.length < 3) return '';
+  const mid = line.map(c => (c.y0 + c.y1) / 2).sort((a, b) => a - b)[line.length >> 1];
+  line = line.filter(c => Math.abs((c.y0 + c.y1) / 2 - mid) < href * 0.35);
+  // longest run with normal spacing
+  let best = [], run = [];
+  for (const c of line) { if (run.length && c.x0 - run[run.length - 1].x1 > href * 0.9) { if (run.length > best.length) best = run; run = []; } run.push(c); }
+  if (run.length > best.length) best = run;
+  if (best.length < 4) return '';
+  const T = glyphTemplates(); let low = 9;
+  const txt = best.map(c => {
+    const at = (x, y) => ink[y * W + x], g = { v: glyphVec(at, c.x0, c.y0, c.x1, c.y1), ar: c.w / c.h, holes: glyphHoles(at, c.x0, c.y0, c.x1, c.y1), bands: glyphBands(at, c.x0, c.y0, c.x1, c.y1) };
+    const per = {};
+    for (const t of T) { const s2 = glyphScore(g, t); if (!(per[t.d] >= s2)) per[t.d] = s2; }
+    const [[top, sc], [, sc2]] = Object.entries(per).sort((a, b) => b[1] - a[1]);
+    if (sc - sc2 < low) low = sc - sc2;
+    return sc > 0.3 ? top : '?';
+  }).join('');
+  readGlyphs.score = low;
+  return txt;
 }
 // Decoder for 7-segment LCD odometers (common in cars), which general text recognition reads badly.
 // Input: output of prepStrip (dark digits on white). Returns the digit string of the main text line.
@@ -686,9 +831,9 @@ function frameBlob(video) {
 }
 // Read the number in a cropped strip: own decoders first (7-segment LCD, dot-matrix, both polarities), general text recognition as a suggestion
 async function decodeCrop(crop, expected, w) {
-  const s1 = prepStrip(crop), s2 = prepStrip(crop, true);
+  const s1 = prepStrip(crop), s2 = prepStrip(crop, true), [g, gs] = glyphRead(crop);
   const ok = v => v != null && (expected != null ? (v >= expected && v <= expected + 5000) : String(v).length >= 5);
-  const reads = [[readSevenSeg(s1), s1, true], [readSevenSeg(s2), s2, true], [readDotMatrix(s1), s1, false], [readDotMatrix(s2), s2, false]];
+  const reads = [[readSevenSeg(s1), s1, true], [readSevenSeg(s2), s2, true], [g.txt, gs, true], [readDotMatrix(s1), s1, false], [readDotMatrix(s2), s2, false]];
   let pick = null;
   for (const [txt, st, seg] of reads) { if (seg && txt.includes('?')) continue; const v = odoCandidates(txt, expected)[0]; if (ok(v)) { pick = { v, st }; break; } }
   const cut = !pick && reads.some(r => r[2] && /\d\?|\?\d/.test(r[0]));
@@ -704,12 +849,26 @@ async function decodeCrop(crop, expected, w) {
   return { c, fromSeg, cut, plausible };
 }
 // Photo mode: read many windows around the frame and vote, so a frame that sits a bit off still gives the right number
+// printed-digit decoder over three colour channels and both polarities; returns the best read and its strip
+function glyphRead(crop) {
+  let best = { txt: '', score: -9, clean: false }, bs = null;
+  for (const ch of ['gray', 'red', 'green']) for (const inv of [false, true]) {
+    const st = prepStrip(crop, inv, ch), txt = readGlyphs(st), score = readGlyphs.score, clean = txt.length >= 5 && !txt.includes('?');
+    if ((clean && !best.clean) || (clean === best.clean && (txt.length > best.txt.length || (txt.length === best.txt.length && score > best.score)))) { best = { txt, score, clean }; bs = st; }
+    if (best.clean && best.score > 0.12) return [best, bs];
+  }
+  return [best, bs];
+}
 function segReads(crop, expected) {
-  const s1 = prepStrip(crop), s2 = prepStrip(crop, true), out = [];
-  for (const [txt, seg] of [[readSevenSeg(s1), 1], [readSevenSeg(s2), 1], [readDotMatrix(s1), 0], [readDotMatrix(s2), 0]]) {
+  const s1 = prepStrip(crop), s2 = prepStrip(crop, true), out = [], [g] = glyphRead(crop);
+  // a clean, confident read of printed digits outweighs the segment decoders, which misread such fonts;
+  // five or more cleanly shaped printed digits means this is no segment display, so those decoders are left out
+  const gr = [g.txt, 1, g.clean && g.score > 0.12 ? 3 : 1];
+  const reads = g.clean ? [gr] : [[readSevenSeg(s1), 1, 1], [readSevenSeg(s2), 1, 1], gr, [readDotMatrix(s1), 0, 1], [readDotMatrix(s2), 0, 1]];
+  for (const [txt, seg, k] of reads) {
     if (seg && txt.includes('?')) continue;
     const v = odoCandidates(txt, expected)[0];
-    if (v != null && String(v).length >= 4) out.push(v);
+    if (v != null && String(v).length >= 4 && !out.some(o => o.v === v && o.k >= k)) out.push({ v, k });
   }
   return out;
 }
@@ -725,7 +884,8 @@ async function decodeSearch(img, f, expected, w) {
   for (const hk of [1, 0.7]) for (const wk of [1, 1.2]) for (const dy of [0, -0.17, 0.17, -0.33, 0.33, -0.5, 0.5]) {
     const ch = f.sh * hk, cw = f.sw * wk, c = cut(f.sx - (cw - f.sw) / 2, f.sy + f.sh / 2 + dy * f.sh - ch / 2, cw, ch);
     if (!c) continue;
-    const vs = new Set(segReads(c, expected)); vs.forEach(v => add(v, dy === 0 && hk === 1 && wk === 1 ? 1.5 : 1));
+    const vs = new Map(); for (const { v, k } of segReads(c, expected)) vs.set(v, Math.max(vs.get(v) || 0, k));
+    vs.forEach((k, v) => add(v, k * (dy === 0 && hk === 1 && wk === 1 ? 1.5 : 1)));
     if (++n % 6 === 0) await sleep(0);
   }
   // a number missing its last digit counts for the full one; a stray "1" in front (edge of the display) counts for the number without it
@@ -2029,7 +2189,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-21.5';
+const APP_VERSION = '2026-10-22.1';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
