@@ -376,6 +376,8 @@ const CAM_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 8h3.2
 const TESS_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
 let ocrPromise = null;
 function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('load ' + src)); document.head.appendChild(s); }); }
+// the text recognition needs a lot of memory, so it is shut down when the scanner closes
+function dropOcr() { const p = ocrPromise; ocrPromise = null; if (p) p.then(w => w.terminate()).catch(() => {}); }
 function getOcr() {
   if (!ocrPromise) ocrPromise = (async () => {
     if (!window.Tesseract) await loadScript(TESS_URL);
@@ -391,11 +393,13 @@ async function loadImg(file) {
   try { await img.decode(); return img; } finally { setTimeout(() => URL.revokeObjectURL(url), 2000); }
 }
 function toCanvas(img, max) {
-  const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-  const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = Math.min(1, max / Math.max(iw, ih));
+  const c = document.createElement('canvas'); c.width = Math.round(iw * k); c.height = Math.round(ih * k);
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); return c;
 }
 const canvasBlob = (c, q) => new Promise(r => c.toBlob(r, 'image/jpeg', q));
+// iOS frees canvas memory late and kills the app when too much piles up, so scratch canvases are emptied right after use
+const freeCanvas = (...cs) => cs.forEach(c => { if (c) { c.width = 0; c.height = 0; } });
 function prepForOcr(img, invert) {
   // grayscale + contrast stretch, optionally inverted for light digits on dark displays
   const c = toCanvas(img, 1600), ctx = c.getContext('2d'), d = ctx.getImageData(0, 0, c.width, c.height), p = d.data;
@@ -422,10 +426,10 @@ function odoCandidates(text, expected) {
 async function readOdometer(img, expected) {
   const w = await getOcr();
   await w.setParameters({ tessedit_pageseg_mode: '11' });
-  let r = await w.recognize(prepForOcr(img, false));
+  const p1 = prepForOcr(img, false); let r = await w.recognize(p1); freeCanvas(p1);
   let c = odoCandidates(r.data.text, expected);
   if (!c.length || (expected != null && !(c[0] >= expected && c[0] <= expected + 5000))) {
-    r = await w.recognize(prepForOcr(img, true));
+    const p2 = prepForOcr(img, true); r = await w.recognize(p2); freeCanvas(p2);
     const c2 = odoCandidates(r.data.text, expected);
     c = [...new Set([...c2, ...c])];
     if (expected != null) c = odoCandidates(c.join(' '), expected);
@@ -556,6 +560,7 @@ function glyphTemplates() {
     const at = (a, b) => d[(b * 140 + a) * 4] < 128 ? 1 : 0;
     GLYPHS.push({ d: String(dg), v: glyphVec(at, x0, y0, x1, y1), ar: (x1 - x0 + 1) / (y1 - y0 + 1), holes: glyphHoles(at, x0, y0, x1, y1), bands: glyphBands(at, x0, y0, x1, y1) });
   }
+  freeCanvas(c);
   return GLYPHS;
 }
 function readGlyphs(strip) {
@@ -827,7 +832,7 @@ function frameBlob(video) {
   const k = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
   const c = document.createElement('canvas'); c.width = Math.round(video.videoWidth * k); c.height = Math.round(video.videoHeight * k);
   c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
-  return canvasBlob(c, 0.7);
+  return canvasBlob(c, 0.7).finally(() => freeCanvas(c));
 }
 // Read the number in a cropped strip: own decoders first (7-segment LCD, dot-matrix, both polarities), general text recognition as a suggestion
 async function decodeCrop(crop, expected, w) {
@@ -846,25 +851,26 @@ async function decodeCrop(crop, expected, w) {
     if (c2 != null && (ok(c2) || c == null)) c = c2;
   }
   const plausible = c != null && (expected != null ? (c >= expected && c <= expected + 5000) : String(c).length >= 4);
+  freeCanvas(s1, s2, gs);
   return { c, fromSeg, cut, plausible };
 }
-// Photo mode: read many windows around the frame and vote, so a frame that sits a bit off still gives the right number
 // printed-digit decoder over three colour channels and both polarities; returns the best read and its strip
 function glyphRead(crop) {
   let best = { txt: '', score: -9, clean: false }, bs = null;
   for (const ch of ['gray', 'red', 'green']) for (const inv of [false, true]) {
     const st = prepStrip(crop, inv, ch), txt = readGlyphs(st), score = readGlyphs.score, clean = txt.length >= 5 && !txt.includes('?');
-    if ((clean && !best.clean) || (clean === best.clean && (txt.length > best.txt.length || (txt.length === best.txt.length && score > best.score)))) { best = { txt, score, clean }; bs = st; }
+    if ((clean && !best.clean) || (clean === best.clean && (txt.length > best.txt.length || (txt.length === best.txt.length && score > best.score)))) { freeCanvas(bs); best = { txt, score, clean }; bs = st; } else freeCanvas(st);
     if (best.clean && best.score > 0.12) return [best, bs];
   }
   return [best, bs];
 }
 function segReads(crop, expected) {
-  const s1 = prepStrip(crop), s2 = prepStrip(crop, true), out = [], [g] = glyphRead(crop);
+  const out = [], [g, gs] = glyphRead(crop); freeCanvas(gs);
   // a clean, confident read of printed digits outweighs the segment decoders, which misread such fonts;
   // five or more cleanly shaped printed digits means this is no segment display, so those decoders are left out
   const gr = [g.txt, 1, g.clean && g.score > 0.12 ? 3 : 1];
-  const reads = g.clean ? [gr] : [[readSevenSeg(s1), 1, 1], [readSevenSeg(s2), 1, 1], gr, [readDotMatrix(s1), 0, 1], [readDotMatrix(s2), 0, 1]];
+  let reads = [gr];
+  if (!g.clean) { const s1 = prepStrip(crop), s2 = prepStrip(crop, true); reads = [[readSevenSeg(s1), 1, 1], [readSevenSeg(s2), 1, 1], gr, [readDotMatrix(s1), 0, 1], [readDotMatrix(s2), 0, 1]]; freeCanvas(s1, s2); }
   for (const [txt, seg, k] of reads) {
     if (seg && txt.includes('?')) continue;
     const v = odoCandidates(txt, expected)[0];
@@ -872,10 +878,13 @@ function segReads(crop, expected) {
   }
   return out;
 }
-async function decodeSearch(img, f, expected, w) {
+// Photo mode: read many windows around the frame and vote, so a frame that sits a bit off still gives the right number.
+// stale() says a newer search has started; this one then stops so searches never pile up
+async function decodeSearch(img, f, expected, w, stale = () => false) {
   const votes = new Map(), add = (v, k) => votes.set(v, (votes.get(v) || 0) + k);
+  const IW = img.naturalWidth || img.width, IH = img.naturalHeight || img.height;
   const cut = (x, y, cw, ch) => {
-    x = Math.max(0, x); y = Math.max(0, y); cw = Math.min(img.naturalWidth - x, cw); ch = Math.min(img.naturalHeight - y, ch);
+    x = Math.max(0, x); y = Math.max(0, y); cw = Math.min(IW - x, cw); ch = Math.min(IH - y, ch);
     if (cw < 10 || ch < 6) return null;
     const c = document.createElement('canvas'), k = Math.min(1, 900 / cw); c.width = Math.round(cw * k); c.height = Math.max(1, Math.round(ch * k));
     c.getContext('2d').drawImage(img, x, y, cw, ch, 0, 0, c.width, c.height); return c;
@@ -886,7 +895,8 @@ async function decodeSearch(img, f, expected, w) {
     if (!c) continue;
     const vs = new Map(); for (const { v, k } of segReads(c, expected)) vs.set(v, Math.max(vs.get(v) || 0, k));
     vs.forEach((k, v) => add(v, k * (dy === 0 && hk === 1 && wk === 1 ? 1.5 : 1)));
-    if (++n % 6 === 0) await sleep(0);
+    freeCanvas(c);
+    n++; await sleep(0); if (stale()) return { c: null, stale: true };
   }
   // a number missing its last digit counts for the full one; a stray "1" in front (edge of the display) counts for the number without it
   const v0 = new Map(votes);
@@ -912,7 +922,8 @@ async function decodeSearch(img, f, expected, w) {
 // Photo mode: the iPhone camera app takes the picture (no permission prompt), then the frame is moved over the digits
 function framePhoto(file, expected, label, inputId) {
   return new Promise(async resolve => {
-    let img; try { img = await loadImg(file); } catch { toast('Das Foto konnte nicht geöffnet werden.'); resolve(null); return; }
+    // work on a copy of at most 2400 px: a full 12-megapixel photo shown zoomed in uses more memory than iOS allows
+    let img; try { const full = await loadImg(file); img = toCanvas(full, 2400); full.src = ''; } catch { toast('Das Foto konnte nicht geöffnet werden.'); resolve(null); return; }
     const ov = document.createElement('div'); ov.className = 'scanner photo'; ov.setAttribute('role', 'dialog');
     ov.innerHTML = `<div class="pan"></div><div class="scan-frame"></div>
       <div class="scan-top"><b>${esc(label)}</b><span>Foto verschieben, bis der Gesamt-KM-Stand im Rahmen ist</span><div class="zoom"><button class="btn small" data-z="-1" aria-label="Verkleinern">−</button><button class="btn small" data-z="1" aria-label="Vergrößern">+</button></div></div>
@@ -920,11 +931,10 @@ function framePhoto(file, expected, label, inputId) {
         <div class="scan-actions"><button class="btn primary" data-a="ok" disabled>Übernehmen</button><button class="btn" data-a="manual">Eintippen</button><button class="btn" data-a="cancel">Abbrechen</button></div></div>`;
     document.body.appendChild(ov);
     const pan = ov.querySelector('.pan'), frame = ov.querySelector('.scan-frame'), readEl = ov.querySelector('.scan-read'), okBtn = ov.querySelector('[data-a=ok]');
-    img.className = 'pan-img'; img.alt = 'Foto KM-Stand'; pan.appendChild(img);
+    img.className = 'pan-img'; img.setAttribute('role', 'img'); img.setAttribute('aria-label', 'Foto KM-Stand'); pan.appendChild(img);
     const zooms = [1, 1.6, 2.5, 4]; let zi = 2, best = null, timer = null, seq = 0, w = null, done = false;
-    getOcr().then(x => { w = x; }).catch(() => {});
-    const blob = canvasBlob(toCanvas(img, 1280), 0.7).catch(() => null);
-    const finish = r => { if (done) return; done = true; ov.remove(); resolve(r); };
+    const small = toCanvas(img, 1280), blob = canvasBlob(small, 0.7).catch(() => null).finally(() => freeCanvas(small));
+    const finish = r => { if (done) return; done = true; seq++; clearTimeout(timer); ov.remove(); blob.finally(() => freeCanvas(img)); resolve(r); };
     const setZoom = (k, keepCenter = true) => {
       const cx = (pan.scrollLeft + pan.clientWidth / 2) / pan.scrollWidth, cy = (pan.scrollTop + pan.clientHeight / 2) / pan.scrollHeight;
       zi = Math.max(0, Math.min(zooms.length - 1, k));
@@ -935,12 +945,12 @@ function framePhoto(file, expected, label, inputId) {
     };
     const read = async () => {
       const my = ++seq;
-      const ir = img.getBoundingClientRect(), fr = frame.getBoundingClientRect(), k = img.naturalWidth / ir.width;
+      const ir = img.getBoundingClientRect(), fr = frame.getBoundingClientRect(), k = img.width / ir.width;
       const sx = Math.max(0, (fr.left - ir.left) * k), sy = Math.max(0, (fr.top - ir.top) * k);
-      const sw = Math.min(img.naturalWidth - sx, fr.width * k), sh = Math.min(img.naturalHeight - sy, fr.height * k);
+      const sw = Math.min(img.width - sx, fr.width * k), sh = Math.min(img.height - sy, fr.height * k);
       if (sw < 10 || sh < 10) { readEl.classList.add('msg'); readEl.textContent = 'Rahmen über die Zahl schieben'; return; }
       readEl.classList.add('msg'); readEl.textContent = 'Lese…';
-      let r; try { r = await decodeSearch(img, { sx, sy, sw, sh }, expected, w); } catch (e) { console.warn(e); r = { c: null }; }
+      let r; try { r = await decodeSearch(img, { sx, sy, sw, sh }, expected, w, () => my !== seq || done); } catch (e) { console.warn(e); r = { c: null }; }
       if (my !== seq || done) return;
       if (r.c != null) {
         best = r.c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(r.c)}`; readEl.classList.remove('msg');
@@ -949,7 +959,7 @@ function framePhoto(file, expected, label, inputId) {
         if (!r.sure && alt.length) { readEl.insertAdjacentHTML('beforeend', `<span class="scan-alt">${alt.map(v => `<button type="button" class="btn small" data-alt="${v}">${fmtInt(v)}</button>`).join('')}</span>`); readEl.querySelectorAll('[data-alt]').forEach(b => b.onclick = () => { best = +b.dataset.alt; okBtn.textContent = `Übernehmen: ${fmtInt(best)}`; }); }
       } else { best = null; okBtn.disabled = true; okBtn.textContent = 'Übernehmen'; readEl.classList.add('msg'); readEl.textContent = 'Keine Zahl im Rahmen. Foto verschieben oder zoomen.'; }
     };
-    const schedule = () => { clearTimeout(timer); timer = setTimeout(read, 250); };
+    const schedule = () => { clearTimeout(timer); seq++; timer = setTimeout(read, 400); };
     pan.addEventListener('scroll', schedule, { passive: true });
     ov.querySelectorAll('[data-z]').forEach(b => b.onclick = () => setZoom(zi + +b.dataset.z));
     ov.querySelector('[data-a=cancel]').onclick = () => finish(null);
@@ -970,7 +980,7 @@ function scanOdometer(expected, label, inputId) {
     document.body.appendChild(ov);
     const hintEl = ov.querySelector('.scan-top span'), video = ov.querySelector('video'), readEl = ov.querySelector('.scan-read'), okBtn = ov.querySelector('[data-a=ok]'), frame = ov.querySelector('.scan-frame');
     let stream = null, stopped = false, best = null, last = null, streak = 0;
-    const close = () => { stopped = true; stream && stream.getTracks().forEach(t => t.stop()); ov.remove(); };
+    const close = () => { stopped = true; stream && stream.getTracks().forEach(t => t.stop()); ov.remove(); dropOcr(); };
     const take = async v => { if (stopped) return; stopped = true; frame.classList.add('ok'); let blob = null; try { blob = await frameBlob(video); } catch {} close(); resolve({ value: v, blob }); };
     ov.querySelector('[data-a=cancel]').onclick = () => { close(); resolve(null); };
     ov.querySelector('[data-a=manual]').onclick = () => { close(); const i = document.getElementById(inputId); if (i) { i.focus(); i.select?.(); } resolve({ manual: true }); };
@@ -985,7 +995,7 @@ function scanOdometer(expected, label, inputId) {
     while (!stopped) {
       if (video.videoWidth && document.visibilityState === 'visible') {
         try {
-          const r = await decodeCrop(cropFrame(video, frame), expected, w);
+          const crop = cropFrame(video, frame), r = await decodeCrop(crop, expected, w); freeCanvas(crop);
           if (stopped) break;
           if (r.c != null) {
             best = r.c; okBtn.disabled = false; okBtn.textContent = `Übernehmen: ${fmtInt(r.c)}`;
@@ -1031,13 +1041,13 @@ async function processOdoPhoto(file, root, inputId, expectedFor, onPhoto) {
     const done = busy(ocrPromise ? 'KM-Stand wird gelesen…' : 'KM-Stand wird gelesen… (beim ersten Mal etwas länger)');
     let img;
     try { img = await loadImg(file); } catch { done(); toast('Das Foto konnte nicht geöffnet werden.'); return; }
-    try { await store.putPhoto(btn.dataset.key, await canvasBlob(toCanvas(img, 1280), 0.7)); }
+    try { const sc = toCanvas(img, 1280); await store.putPhoto(btn.dataset.key, await canvasBlob(sc, 0.7)); freeCanvas(sc); }
     catch { done(); toast('Das Foto konnte nicht gespeichert werden.'); return; }
     btn.classList.add('has');
     let cands = [];
     const expected = expectedFor(inputId);
     try { cands = await readOdometer(img, expected); } catch (e) { console.warn(e); }
-    done();
+    dropOcr(); done();
     const setVal = v => { input.value = v; input.dispatchEvent(new Event('input', { bubbles: true })); };
     if (cands.length) {
       setVal(cands[0]);
@@ -1054,10 +1064,10 @@ async function processOdoPhoto(file, root, inputId, expectedFor, onPhoto) {
   }
 }
 async function renderThumbs(el, id) {
-  const parts = [];
+  const parts = []; (el._urls || []).forEach(u => URL.revokeObjectURL(u)); el._urls = [];
   for (const [w, l] of [['start', 'Beginn'], ['end', 'Ende']]) {
     let b = null; try { b = await store.getPhoto(`${id}:${w}`); } catch {}
-    if (b) { const u = URL.createObjectURL(b); parts.push(`<button type="button" class="thumb" data-full="${u}"><img src="${u}" alt="Foto KM-Stand ${l}"><span>Foto KM-Stand ${l}</span></button>`); }
+    if (b) { const u = URL.createObjectURL(b); el._urls.push(u); parts.push(`<button type="button" class="thumb" data-full="${u}"><img src="${u}" alt="Foto KM-Stand ${l}"><span>Foto KM-Stand ${l}</span></button>`); }
   }
   el.innerHTML = parts.join(''); el.hidden = !parts.length;
   el.querySelectorAll('[data-full]').forEach(b => b.onclick = () => viewImage(b.dataset.full));
@@ -2189,7 +2199,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-22.1';
+const APP_VERSION = '2026-10-23.1';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
