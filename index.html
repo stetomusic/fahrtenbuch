@@ -10,10 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Fahrtenbuch">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icon.svg?v=3" type="image/svg+xml">
-<link rel="icon" type="image/png" sizes="192x192" href="car-192.png">
-<link rel="apple-touch-icon" sizes="180x180" href="car-180.png">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="fb-icon-192.png">
+<link rel="apple-touch-icon" href="https://stetomusic.github.io/fahrtenbuch/fb-icon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap">
@@ -2199,7 +2197,7 @@ function openSettings(focus) {
 }
 
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-23.1';
+const APP_VERSION = '2026-10-24.1';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
