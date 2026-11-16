@@ -16,9 +16,13 @@ self.addEventListener('fetch', e => {
   // icons and the manifest go straight to the network: the iPhone reads them when adding to the home screen
   if (sameOrigin && /\.(png|svg|webmanifest)$/.test(url.pathname)) return;
   if (sameOrigin) {
-    // Network first, so updates arrive; cache as fallback when offline.
-    e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
-      .catch(() => caches.match(e.request).then(r => r || (e.request.mode === 'navigate' ? caches.match('./index.html') : Response.error()))));
+    // Network first, so updates arrive; the cache answers when offline or when the network takes longer than 3.5 s
+    // (weak reception in the car or garage must not leave the app on a white screen).
+    const net = fetch(e.request, { cache: 'no-cache' }).then(r => { if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); } return r; });
+    const cached = () => caches.match(e.request).then(r => r || (e.request.mode === 'navigate' ? caches.match('./index.html') : undefined));
+    e.respondWith(Promise.race([net.catch(() => null), new Promise(r => setTimeout(() => r(null), 3500))])
+      .then(r => r || cached().then(c => c || net)).catch(() => Response.error()));
+    e.waitUntil(net.catch(() => {}));
   } else if (staticCdn) {
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request).then(res => { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return res; })));
   }

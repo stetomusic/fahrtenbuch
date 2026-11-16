@@ -334,6 +334,29 @@ function trackStats(tr) {
   for (let i = 1; i < tr.length; i++) { const d = hav(tr[i - 1], tr[i]); km += d; if (d > 1.5) gap += d; }
   return { km, gapShare: km ? gap / km : 1 };
 }
+// Thin out a recorded track: points that lie on a straight stretch (within about 8 m) are dropped, at least one point per km stays.
+// The distance is measured before this, so the result only makes stored trips and backups much smaller.
+function simplifyTrack(tr, tolKm = 0.008) {
+  if (tr.length < 3) return tr;
+  const k = Math.cos(tr[0][0] * Math.PI / 180), X = p => p[1] * 111.32 * k, Y = p => p[0] * 110.57;
+  const keep = new Uint8Array(tr.length); keep[0] = keep[tr.length - 1] = 1;
+  const stack = [[0, tr.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop(); if (b - a < 2) continue;
+    const ax = X(tr[a]), ay = Y(tr[a]), dx = X(tr[b]) - ax, dy = Y(tr[b]) - ay, len2 = dx * dx + dy * dy;
+    let max = -1, mi = -1;
+    for (let i = a + 1; i < b; i++) {
+      const px = X(tr[i]) - ax, py = Y(tr[i]) - ay;
+      let u = len2 ? (px * dx + py * dy) / len2 : 0; u = u < 0 ? 0 : u > 1 ? 1 : u;
+      const d = Math.hypot(px - u * dx, py - u * dy);
+      if (d > max) { max = d; mi = i; }
+    }
+    if (max > tolKm) { keep[mi] = 1; stack.push([a, mi], [mi, b]); }
+  }
+  const out = [tr[0]];
+  for (let i = 1; i < tr.length; i++) if (keep[i] || hav(out[out.length - 1], tr[i + 1]) > 1) out.push(tr[i]);
+  return out;
+}
 
 /* ---------- storage (IndexedDB, stays on this phone) ---------- */
 const store = {
@@ -347,16 +370,30 @@ const store = {
         if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta');
         if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos');
       };
-      r.onsuccess = () => { this.db = r.result; res(); };
+      r.onsuccess = () => {
+        const d = r.result; this.db = d;
+        d.onclose = () => { if (this.db === d) this.db = null; };
+        d.onversionchange = () => { d.close(); if (this.db === d) this.db = null; };
+        res();
+      };
       r.onerror = () => rej(r.error);
+      r.onblocked = () => rej(new Error('Speicher blockiert'));
     });
   },
   run(name, mode, fn) {
-    return new Promise((res, rej) => {
+    const once = () => new Promise((res, rej) => {
       const t = this.db.transaction(name, mode);
       const out = fn(t.objectStore(name));
       t.oncomplete = () => res(out instanceof IDBRequest ? out.result : undefined);
       t.onerror = () => rej(t.error);
+      // a full disk aborts the transaction without an error event; without this the caller would wait forever
+      t.onabort = () => rej(t.error || new Error('Speichern abgebrochen'));
+    });
+    // the iPhone sometimes drops the database connection while the app sleeps: open it again and try once more
+    return (this.db ? once() : this.open().then(once)).catch(async e => {
+      if (!/InvalidStateError|UnknownError|TransactionInactiveError/.test(e?.name || '') && !/connection|clos/i.test(e?.message || '')) throw e;
+      try { this.db?.close(); } catch {}
+      this.db = null; await this.open(); return once();
     });
   },
   trips() { return this.run('trips', 'readonly', s => s.getAll()); },
@@ -1127,8 +1164,24 @@ function gmapsUrl(t) {
   return `https://www.google.com/maps/dir/?api=1&travelmode=driving&origin=${s.lat},${s.lng}&destination=${e.lat},${e.lng}${wp}`;
 }
 
+// Stretches without GPS (app closed or in the background) are filled with the road route between the two points around the gap.
+// Returns the km to add to the straight-line track length, or null when that was not possible.
+async function fillGaps(tr, maxGaps = 6, budget = 10000) {
+  const gaps = [];
+  for (let i = 1; i < tr.length; i++) { const d = hav(tr[i - 1], tr[i]); if (d > 1.5) gaps.push([i, d]); }
+  if (!gaps.length || gaps.length > maxGaps) return null;
+  const t0 = Date.now(); let add = 0;
+  for (const [i, d] of gaps) {
+    if (Date.now() - t0 > budget) return null;
+    const r = await routeKm({ lat: tr[i - 1][0], lng: tr[i - 1][1] }, { lat: tr[i][0], lng: tr[i][1] });
+    if (!r) return null;
+    add += Math.max(r.km, d) - d;
+  }
+  return add;
+}
+
 /* ---------- GPS ---------- */
-let watchId = null, wakeLock = null, lastSave = 0, tick = null;
+let watchId = null, wakeLock = null, wakePending = false, lastSave = 0, tick = null, lastFixAt = 0, gpsDenied = false, watchdog = null;
 function getPos(timeout = 12000) {
   return new Promise(res => {
     if (!navigator.geolocation) return res(null);
@@ -1140,19 +1193,38 @@ function getPos(timeout = 12000) {
 function startWatch() {
   requestWake();
   if (!navigator.geolocation || watchId !== null) return;
-  watchId = navigator.geolocation.watchPosition(onPos, () => {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+  lastFixAt = Date.now();
+  watchId = navigator.geolocation.watchPosition(onPos, onPosErr, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+  // the iPhone sometimes stops delivering positions after the app was in the background: start the tracking again when nothing arrives
+  clearInterval(watchdog);
+  watchdog = setInterval(() => { if (S.active && document.visibilityState === 'visible' && Date.now() - lastFixAt > 45000) restartWatch(); }, 15000);
+}
+function restartWatch() {
+  if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+  watchId = null;
+  if (S.active) startWatch();
 }
 function stopWatch() {
   if (watchId !== null) navigator.geolocation.clearWatch(watchId);
-  watchId = null;
+  watchId = null; clearInterval(watchdog); watchdog = null;
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
 }
 async function requestWake() {
-  try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch {}
+  if (!('wakeLock' in navigator) || wakeLock || wakePending) return;
+  wakePending = true;
+  try { const w = await navigator.wakeLock.request('screen'); wakeLock = w; w.addEventListener('release', () => { if (wakeLock === w) wakeLock = null; }); if (!S.active) { w.release().catch(() => {}); } } catch {}
+  wakePending = false;
+}
+function onPosErr(e) {
+  if (!e || e.code !== 1 || !S.active) return;
+  if (!gpsDenied) toast('Standort ist nicht erlaubt (iPhone-Einstellungen › Datenschutz › Ortungsdienste). Die Fahrt läuft trotzdem, die Strecke kommt dann aus der Route.', 9000);
+  gpsDenied = true; updateLive();
 }
 function onPos(p) {
   const a = S.active; if (!a) return;
   const c = p.coords; S.lastAcc = Math.round(c.accuracy);
+  lastFixAt = Date.now(); gpsDenied = false;
+  S.lastFix = { lat: +c.latitude.toFixed(6), lng: +c.longitude.toFixed(6), acc: Math.round(c.accuracy), at: lastFixAt };
   if (c.accuracy <= 60) {
     const pt = [+c.latitude.toFixed(6), +c.longitude.toFixed(6), Math.round(p.timestamp / 1000)];
     const last = a.track[a.track.length - 1];
@@ -1169,8 +1241,9 @@ function onPos(p) {
 }
 document.addEventListener('visibilitychange', () => {
   if (!S.active) return;
-  if (document.visibilityState === 'visible') requestWake(); else saveActive();
+  if (document.visibilityState === 'visible') { requestWake(); if (!stopping) restartWatch(); } else saveActive();
 });
+addEventListener('pagehide', () => { if (S.active) saveActive(); });
 
 /* ---------- data ---------- */
 const sortByTime = (a, b) => b.start.t - a.start.t;
@@ -1211,7 +1284,12 @@ function l17Stats() {
   ts.forEach(t => { const k = t.km || 0; if (d1 == null || t.start.t <= d1) p1 += k; else if (d2 == null || t.start.t <= d2) p2 += k; else p3 += k; });
   return { trips: ts, p1, p2, p3, total: p1 + p2 + p3, d1, d2 };
 }
-function saveActive() { return store.set('active', S.active || null); }
+// the running trip is also mirrored outside the database, so it survives if the database write fails
+const LS_ACTIVE = 'fb-active';
+function saveActive() {
+  try { if (S.active) localStorage.setItem(LS_ACTIVE, JSON.stringify(S.active)); else localStorage.removeItem(LS_ACTIVE); } catch {}
+  return store.set('active', S.active || null).catch(e => { console.warn(e); });
+}
 function yearsAvailable() { const ys = new Set(S.trips.map(t => new Date(t.start.t).getFullYear())); ys.add(new Date().getFullYear()); return [...ys].sort((a, b) => b - a); }
 function cityOf(addr) { if (!addr) return ''; const parts = addr.split(',').map(s => s.trim()); return (parts[parts.length - 1] || '').replace(/^\d{4,5}\s+/, ''); }
 /* favourites: the most frequent destination + purpose + client from earlier trips of the same mode, newer trips count more */
@@ -1386,7 +1464,7 @@ function renderControl() {
 function updateLive() {
   if (!S.active) return;
   const k = $('#liveKm'); if (k) k.textContent = fmtKm(trackStats(S.active.track).km) + ' km';
-  const ac = $('#liveAcc'); if (ac) ac.textContent = S.lastAcc != null ? `± ${S.lastAcc} m` : '–';
+  const ac = $('#liveAcc'); if (ac) ac.textContent = gpsDenied ? 'nicht erlaubt' : S.lastAcc != null ? `± ${S.lastAcc} m` : '–';
 }
 
 function renderLog() {
@@ -1417,20 +1495,21 @@ function renderLog() {
 }
 
 /* ---------- sheets, toast, busy ---------- */
-let sheetOnClose = null;
-function openSheet(html, mount) {
-  sheetOnClose = null;
+let sheetOnClose = null, sheetSticky = false;
+// sticky: a tap beside the sheet does not close it (forms, so typed text is not lost by a slip of the finger)
+function openSheet(html, mount, { sticky = false } = {}) {
+  sheetOnClose = null; sheetSticky = sticky;
   const root = $('#sheetRoot');
   root.innerHTML = `<div class="scrim"><div class="sheet" role="dialog" aria-modal="true">${html}</div></div>`;
   const scrim = root.firstElementChild;
-  scrim.addEventListener('click', e => { if (e.target === scrim) closeSheet(); });
+  scrim.addEventListener('click', e => { if (e.target === scrim && !sheetSticky) closeSheet(); });
   root.querySelectorAll('[data-close]').forEach(b => b.onclick = closeSheet);
   mount && mount(scrim.firstElementChild);
 }
 function closeSheet() { const f = sheetOnClose; sheetOnClose = null; $('#sheetRoot').innerHTML = ''; f && f(); }
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !sheetSticky) closeSheet(); });
 let toastTimer;
-function toast(msg) { clearTimeout(toastTimer); $('#toastRoot').innerHTML = `<div class="toast" role="status">${esc(msg)}</div>`; toastTimer = setTimeout(() => $('#toastRoot').innerHTML = '', 4000); }
+function toast(msg, ms = 4000) { clearTimeout(toastTimer); $('#toastRoot').innerHTML = `<div class="toast" role="status">${esc(msg)}</div>`; toastTimer = setTimeout(() => $('#toastRoot').innerHTML = '', ms); }
 function busy(msg) { const d = document.createElement('div'); d.className = 'busy'; d.innerHTML = `<div>${esc(msg)}</div>`; document.body.appendChild(d); return () => d.remove(); }
 
 /* ---------- start / stop ---------- */
@@ -1471,6 +1550,7 @@ function startTrip() {
 function beginTrip() {
   const t0 = Date.now(), veh = curVehicle(), last = lastTrip(veh?.id), id = uid();
   navigator.storage?.persist?.().catch(() => {});
+  S.lastFix = null; S.lastAcc = null; gpsDenied = false;
   S.active = {
     id, vehicleId: veh?.id || null, type: modeType(), purpose: '', odoStart: last?.odoEnd ?? null,
     start: { t: t0, lat: null, lng: null, acc: null, addr: '' }, track: [],
@@ -1483,7 +1563,7 @@ function beginTrip() {
       if (!a.track.length) a.track.push([pos.lat, pos.lng, Math.round(t0 / 1000)]);
       saveActive(); const el = $('#runStart'); if (el) el.textContent = 'Adresse wird gesucht…';
       resolveStartAddr();
-    } else if (!pos && a.start.lat == null) toast('Noch kein GPS-Signal. Die Fahrt läuft trotzdem, der Standort wird nachgeholt.');
+    } else if (!pos && a.start.lat == null && !gpsDenied) toast('Noch kein GPS-Signal. Die Fahrt läuft trotzdem, der Standort wird nachgeholt.');
   });
 }
 async function resolveStartAddr() {
@@ -1493,45 +1573,60 @@ async function resolveStartAddr() {
   delete a._resolving;
   if (S.active === a && addr) { a.start.addr = addr; saveActive(); const el = $('#runStart'); if (el) el.textContent = addr; }
 }
+let stopping = false;
 function stopTrip() {
-  if (!S.active) return;
+  if (!S.active || stopping) return;
   const mode = odoMode();
   const choice = mode === 'camera' ? Promise.resolve({ mode, req: camRequest() })
     : mode === 'ask' ? askOdo('Fahrt beendet') : Promise.resolve({ mode });
   stopTripGps(choice);
 }
 async function stopTripGps(choice) {
-  const a = S.active; if (!a) return;
+  const a = S.active; if (!a || stopping) return;
+  stopping = true;
+  try { await finishTrip(a, choice); }
+  catch (e) {
+    console.warn(e);
+    document.querySelectorAll('.busy').forEach(b => b.remove());
+    toast('Die Fahrt konnte nicht gespeichert werden. Bitte noch einmal auf „Fahrt beenden“ tippen.', 8000);
+    if (S.active) { render(); startWatch(); }
+  } finally { stopping = false; }
+}
+async function finishTrip(a, choice) {
   const endT = Date.now();
   $('#stopBtn').disabled = true; $('#stopLbl').textContent = 'Ziel wird gesucht…';
-  let pos = await getPos(10000);
+  // a position from the last few seconds is used right away instead of waiting for a new one
+  const lf = S.lastFix;
+  let pos = lf && endT - lf.at < 8000 && lf.acc <= 60 ? { lat: lf.lat, lng: lf.lng, acc: lf.acc } : await getPos(10000);
   stopWatch(); clearInterval(tick);
   const lp = a.track[a.track.length - 1];
   if (pos) { if (!lp || hav(lp, [pos.lat, pos.lng]) > 0.02) a.track.push([pos.lat, pos.lng, Math.round(endT / 1000)]); }
   else if (lp) pos = { lat: lp[0], lng: lp[1], acc: null };
   const end = { t: endT, lat: pos?.lat ?? null, lng: pos?.lng ?? null, acc: pos?.acc ?? null, addr: '' };
-  const lookups = Promise.all([a.start.addr ? a.start.addr : reverseGeocode(a.start), reverseGeocode(end), routeKm(a.start, end)]);
-  const c = await choice;
-  const done = busy('Adresse und Strecke werden ermittelt…');
-  const [sAddr, eAddr, rt] = await lookups;
-  done();
   const st = trackStats(a.track);
   const gpsGood = a.track.length >= 5 && st.gapShare < 0.15;
-  let km = gpsGood ? st.km : (rt ? rt.km : st.km);
+  const lookups = Promise.all([a.start.addr ? a.start.addr : reverseGeocode(a.start), reverseGeocode(end), routeKm(a.start, end), !gpsGood && a.track.length >= 5 ? fillGaps(a.track).catch(() => null) : null]);
+  const c = await choice;
+  const done = busy('Adresse und Strecke werden ermittelt…');
+  const [sAddr, eAddr, rt, extra] = await lookups;
+  done();
+  // a track with gaps: the recorded parts count as driven, only the gaps come from the route (start to destination alone would miss detours and return trips)
+  const filled = extra != null ? st.km + extra : null;
+  let km = gpsGood ? st.km : filled ?? (rt ? rt.km : st.km);
   km = round1(km);
   const trip = {
     id: a.id, vehicleId: a.vehicleId || curVehicle()?.id || null, type: a.type, purpose: a.purpose || '', client: '', note: '',
     companion: companions()[0] || '', weather: '',
     start: { ...a.start, addr: sAddr || '' }, end: { ...end, addr: eAddr || '' },
-    track: a.track, routeLine: rt ? rt.line : null,
-    kmGps: round1(st.km), kmRoute: rt ? round1(rt.km) : null, kmSource: gpsGood ? 'GPS-Aufzeichnung' : (rt ? 'Routenberechnung' : 'GPS-Aufzeichnung (lückenhaft)'),
+    track: simplifyTrack(a.track), routeLine: rt ? rt.line : null,
+    kmGps: round1(st.km), kmRoute: rt ? round1(rt.km) : null, kmSource: gpsGood ? 'GPS-Aufzeichnung' : filled != null ? 'GPS-Aufzeichnung, Lücken über Route ergänzt' : (rt ? 'Routenberechnung' : 'GPS-Aufzeichnung (lückenhaft)'),
     km, odoStart: a.odoStart, odoEnd: a.odoStart != null ? Math.round(a.odoStart + km) : null,
     created: Date.now(), updated: Date.now(), changes: [], manual: false, draft: true,
     photos: { start: !!a.photoStart, end: false },
   };
   trip.light = tripLight(trip);
   await store.putTrip(trip);
-  S.trips.push(trip); S.active = null; await saveActive();
+  S.trips = S.trips.filter(t => t.id !== trip.id); S.trips.push(trip); S.active = null; await saveActive();
   S.year = new Date(trip.start.t).getFullYear();
   render();
   openTripForm(trip, { isNew: true });
@@ -1653,11 +1748,13 @@ function openTripForm(trip, { isNew }) {
     sheet.querySelector('#tf').onsubmit = async e => {
       e.preventDefault();
       const km = num(f('km').value), purpose = f('purpose').value.trim();
-      const pErr = type === 'dienstlich' && !purpose, kErr = km == null, cErr = type === 'l17' && !f('companion').value.trim();
+      const pErr = type === 'dienstlich' && !purpose, kErr = km == null || km < 0, cErr = type === 'l17' && !f('companion').value.trim();
       sheet.querySelector('#w_purpose').classList.toggle('err', pErr); sheet.querySelector('#w_purpose .msg').hidden = !pErr;
       sheet.querySelector('#w_km').classList.toggle('err', kErr); sheet.querySelector('#w_km .msg').hidden = !kErr;
       sheet.querySelector('#w_comp').classList.toggle('err', cErr); sheet.querySelector('#w_comp .msg').hidden = !cErr;
-      if (pErr || kErr || cErr) return;
+      if (pErr || kErr || cErr) { sheet.querySelector('.field.err')?.scrollIntoView({ block: 'center' }); return; }
+      const oS = num(f('odoStart').value), oE = num(f('odoEnd').value);
+      if (oS != null && oE != null && oE < oS) { toast('KM-Stand Ende ist kleiner als KM-Stand Beginn. Bitte prüfen.'); f('odoEnd').scrollIntoView({ block: 'center' }); f('odoEnd').focus(); return; }
       const date = f('date').value || dateVal(trip.start.t);
       const sT = fromInputs(date, f('tStart').value);
       let eT = fromInputs(date, f('tEnd').value || f('tStart').value);
@@ -1681,7 +1778,7 @@ function openTripForm(trip, { isNew }) {
       S.year = new Date(trip.start.t).getFullYear();
       closeSheet(); render(); toast('Fahrt gespeichert.');
     };
-  });
+  }, { sticky: true });
 }
 
 /* ---------- detail ---------- */
@@ -1960,13 +2057,19 @@ async function mergeBackup(data, photoFetch) {
   if (!data || data.app !== 'fahrtenbuch' || !Array.isArray(data.trips)) return null;
   let added = 0, updated = 0;
   for (const t of data.trips) {
+    if (!t || !t.id || !t.start || !Number.isFinite(t.start.t)) continue;
     const cur = S.trips.find(x => x.id === t.id);
     if (!cur) { S.trips.push(t); await store.putTrip(t); added++; }
     else if ((t.updated || 0) > (cur.updated || 0)) { Object.assign(cur, t); await store.putTrip(cur); updated++; }
   }
   for (const [k, u] of Object.entries(data.photos || {})) { if (!(await store.getPhoto(k).catch(() => null))) await store.putPhoto(k, await (await fetch(u)).blob()); }
   if (photoFetch) for (const k of data.photoFiles || []) { if (!(await store.getPhoto(k).catch(() => null))) { const b = await photoFetch(k).catch(() => null); if (b) await store.putPhoto(k, b); } }
+  const mine = vehicles();
   if (data.settings && !S.settings.name && !S.settings.vehicle) { const { dropbox, ...rest } = data.settings; S.settings = { ...S.settings, ...rest }; await store.set('settings', S.settings); }
+  // every vehicle that a trip refers to must exist here, otherwise the trip shows no vehicle
+  const all = [...vehicles()];
+  for (const v of [...mine, ...(Array.isArray(data.settings?.vehicles) ? data.settings.vehicles : [])]) if (v && v.id && !all.some(x => x.id === v.id) && S.trips.some(t => t.vehicleId === v.id)) all.push({ id: v.id, name: v.name || v.plate || 'Auto', plate: v.plate || '' });
+  if (all.length !== vehicles().length) { S.settings.vehicles = all; await store.set('settings', S.settings); }
   return { added, updated };
 }
 
@@ -2107,10 +2210,14 @@ function openBackup() {
     <div class="box" id="dbx" style="display:grid;gap:10px;margin-top:14px"></div>`, sheet => {
     // the file is built as soon as the sheet opens, so one tap on the button opens the share sheet right away
     const build = (async () => {
-      const photos = {};
-      const toData = b => new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); });
-      for (const t of S.trips) for (const w of ['start', 'end']) { if (!t.photos?.[w]) continue; const b = await store.getPhoto(`${t.id}:${w}`).catch(() => null); if (b) photos[`${t.id}:${w}`] = await toData(b); }
-      return new Blob([JSON.stringify({ app: 'fahrtenbuch', version: 2, exported: Date.now(), settings: S.settings, trips: S.trips, photos })], { type: 'application/json' });
+      const toData = b => new Promise((r, rej) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.onerror = () => rej(fr.error); fr.readAsDataURL(b); });
+      // the Dropbox login stays out of the file; the file is put together piece by piece, so many photos do not need one huge text in memory
+      const { dropbox, ...settings } = S.settings;
+      const parts = [JSON.stringify({ app: 'fahrtenbuch', version: 2, exported: Date.now(), settings, trips: S.trips }).slice(0, -1), ',"photos":{'];
+      let n = 0;
+      for (const t of S.trips) for (const w of ['start', 'end']) { if (!t.photos?.[w]) continue; const k = `${t.id}:${w}`, b = await store.getPhoto(k).catch(() => null); if (b) { const u = await toData(b).catch(() => null); if (u) parts.push(`${n++ ? ',' : ''}${JSON.stringify(k)}:${JSON.stringify(u)}`); } }
+      parts.push('}}');
+      return new Blob(parts, { type: 'application/json' });
     })();
     let ready = null; build.then(b => { ready = b; });
     sheet.querySelector('#b_save').onclick = async () => {
@@ -2196,8 +2303,31 @@ function openSettings(focus) {
   });
 }
 
+/* ---------- trips ended without internet have coordinates but no address: look them up later ---------- */
+let backfilling = false; const backfillTried = new Set();
+async function backfillAddrs() {
+  if (backfilling || !navigator.onLine) return;
+  backfilling = true;
+  try {
+    const todo = S.trips.filter(t => !t.manual && !backfillTried.has(t.id) && t.start && t.end && ((t.start.lat != null && !t.start.addr) || (t.end.lat != null && !t.end.addr))).slice(0, 5);
+    for (const t of todo) {
+      backfillTried.add(t.id);
+      const sA = t.start.addr || (t.start.lat != null ? await reverseGeocode(t.start) : ''); await sleep(1100);
+      const eA = t.end.addr || (t.end.lat != null ? await reverseGeocode(t.end) : ''); await sleep(1100);
+      const rt = t.kmRoute == null ? await routeKm(t.start, t.end) : null;
+      // not while a form is open: it would be saved over
+      if ($('#sheetRoot').innerHTML || !S.trips.includes(t)) continue;
+      const now = Date.now(); let ch = false;
+      if (sA && !t.start.addr) { t.start.addr = sA; ch = true; if (!t.draft) (t.changes = t.changes || []).push({ t: now, f: 'Abfahrtsort (automatisch aus GPS ergänzt)', a: '', b: sA }); }
+      if (eA && !t.end.addr) { t.end.addr = eA; ch = true; if (!t.draft) (t.changes = t.changes || []).push({ t: now, f: 'Zielort (automatisch aus GPS ergänzt)', a: '', b: eA }); }
+      if (rt && t.kmRoute == null) { t.kmRoute = round1(rt.km); t.routeLine = rt.line; ch = true; }
+      if (ch) { t.updated = now; await store.putTrip(t); render(); }
+    }
+  } catch (e) { console.warn(e); } finally { backfilling = false; }
+}
+
 /* ---------- updates: the home-screen app stays in memory, so look for a newer version whenever it comes back ---------- */
-const APP_VERSION = '2026-10-24.1';
+const APP_VERSION = '2026-11-16.1';
 let swReg = null, lastCheck = 0;
 async function checkForUpdate() {
   if (Date.now() - lastCheck < 60e3) return;
@@ -2210,9 +2340,11 @@ async function checkForUpdate() {
   } catch {}
 }
 function applyUpdate(v) {
+  // never during a trip: a reload interrupts the recording and the iPhone may ask for the location permission again
+  if (S.active) { lastCheck = 0; return; }
   let tried = null; try { tried = sessionStorage.getItem('updTried'); } catch {}
   const reload = () => { try { sessionStorage.setItem('updTried', v); } catch {} saveActive().finally(() => location.reload()); };
-  const idle = tried !== v && !$('#sheetRoot').innerHTML && !document.querySelector('.busy, .viewer') && !(document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName));
+  const idle = tried !== v && !$('#sheetRoot').innerHTML && !document.querySelector('.busy, .viewer, .scanner, .pv') && !(document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName));
   if (idle) { reload(); return; }
   if ($('.updbar')) return;
   const bar = document.createElement('div'); bar.className = 'updbar'; bar.setAttribute('role', 'status');
@@ -2228,6 +2360,10 @@ function applyUpdate(v) {
     S.trips = (await store.trips()) || [];
     S.settings = { ...S.settings, ...((await store.get('settings')) || {}) };
     S.active = (await store.get('active')) || null;
+    let ls = null; try { ls = JSON.parse(localStorage.getItem(LS_ACTIVE) || 'null'); } catch {}
+    if (ls && ls.id && ls.start && Array.isArray(ls.track) && !S.trips.some(t => t.id === ls.id)
+      && (!S.active || (S.active.id === ls.id && ls.track.length > (S.active.track || []).length))) S.active = ls;
+    if (S.active) delete S.active._resolving;
     // one vehicle from the old single "Fahrzeug" field
     if (!Array.isArray(S.settings.vehicles) || !S.settings.vehicles.length) {
       S.settings.vehicles = [{ id: 'v1', name: S.settings.vehicle || 'Mein Auto', plate: '' }];
@@ -2245,9 +2381,10 @@ function applyUpdate(v) {
   if (S.active) { startWatch(); if (!S.active.start.addr) resolveStartAddr(); }
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => { swReg = r; }).catch(() => {});
   setTimeout(checkForUpdate, 3000);
+  setTimeout(backfillAddrs, 6000);
   setInterval(() => { if (document.visibilityState === 'visible') checkForUpdate(); }, 30 * 60e3);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { checkForUpdate(); autoDropbox(); } });
-  addEventListener('online', autoDropbox);
+  addEventListener('online', () => { autoDropbox(); backfillAddrs(); });
 })();
 </script>
 </body>
